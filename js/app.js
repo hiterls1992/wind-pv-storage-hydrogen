@@ -18,6 +18,13 @@
         financeAllResults: {},     // 经评多方案结果 {schemeName: result}
         financeAllDetails: {},    // 经评多方案详情
         worker: null,              // Web Worker 实例
+
+        // ---- V2.2 参数体系（任务书 §4 / §6 / §21）----
+        // 唯一真值全部托管在 ParameterManager；此处只提供只读代理，
+        // 禁止在 AppState 上另存一份容量参数或运行参数的真值。
+        get currentScheme() { return ParameterManager.getCurrentScheme(); },
+        get simulationConfig() { return ParameterManager.getSimulationConfig(); },
+        get optimizationConfig() { return ParameterManager.getOptimizationConfig(); },
     };
 
     // ========== 日志系统 ==========
@@ -160,45 +167,95 @@
         document.getElementById('btnExportAllCharts').addEventListener('click', exportCurrentSchemeCharts);
     }
 
-    function getSimulationParams() {
-        return {
-            PV_CAPACITY: Utils.toNum(document.getElementById('pvCapacity').value, 360),
-            WIND_CAPACITY: Utils.toNum(document.getElementById('windCapacity').value, 200),
-            ELECTROLYZER_MIN_RATIO: Utils.toNum(document.getElementById('electrolyzerMinRatio').value, 0.3),
-            MAX_EXPORT_RATIO_HOURLY: Utils.toNum(document.getElementById('maxExportHourly').value, 0.0),
-            MAX_EXPORT_RATIO_TOTAL: Utils.toNum(document.getElementById('maxExportTotal').value, 0.0),
-            MAX_IMPORT_RATIO: Utils.toNum(document.getElementById('maxImportRatio').value, 0.15),
-            STORAGE_CHARGE_EFFICIENCY: Utils.toNum(document.getElementById('chargeEfficiency').value, 0.92),
-            STORAGE_DISCHARGE_EFFICIENCY: Utils.toNum(document.getElementById('dischargeEfficiency').value, 0.92),
-            HYDROGEN_ENERGY_CONSUMPTION: Utils.toNum(document.getElementById('hydrogenConsumption').value, 55),
-        };
+    // ==================================================================
+    // ========== 参数层（V2.2 参数体系重构核心，任务书 §20 / §21 / §23）==========
+    // ==================================================================
+    //
+    //   HTML 输入框  ──syncSchemeFromUI()──▶  AppState.currentScheme  ──▶  仿真 / 优化 / 基准 / 结果
+    //   HTML 输入框  ◀──syncSchemeToUI()───   AppState.currentScheme
+    //
+    //   任何模块都不允许再直接读写容量输入框的 DOM 值，必须走上面这两个函数。
+
+    /**
+     * 读取「运行参数」（设备怎么运行）—— 不含任何容量。
+     * 容量一律来自 AppState.currentScheme（任务书 §5 / §12）。
+     * 读取的同时写回 ParameterManager，保证「DOM 改动即真值改动」（§38）。
+     */
+    function getSimulationConfig() {
+        return ParameterManager.syncSimulationConfigFromUI();
     }
 
-    function startSimulation() {
+    /**
+     * 参数层初始化：把「当前方案」「运行参数」两组输入框接进唯一真值通道。
+     * 首屏以 index.html 中的出厂默认值初始化真值（不写死在 JS 里，避免两份默认值漂移）。
+     */
+    function initParameterLayer() {
+        // 1) 当前方案输入框 → 唯一真值（任务书 §38）
+        ParameterManager.SCHEME_KEYS.forEach(key => {
+            const el = document.getElementById(ParameterManager.SCHEME_DOM[key]);
+            if (!el) return;
+            el.addEventListener('input', () => {
+                const res = ParameterManager.syncSchemeFromUI();
+                if (!res.ok) return;             // 非法中间态（如空值）不写入真值
+                updateSchemeStatusUI(res.scheme);
+            });
+            el.addEventListener('change', () => {
+                const res = ParameterManager.syncSchemeFromUI();
+                if (!res.ok) { log('方案参数非法：' + res.message, 'error'); return; }
+                updateSchemeStatusUI(res.scheme);
+            });
+        });
+
+        // 2) 运行参数输入框 → ParameterManager
+        ParameterManager.SIM_KEYS.forEach(key => {
+            const el = document.getElementById(ParameterManager.SIM_DOM[key]);
+            if (el) el.addEventListener('change', () => ParameterManager.syncSimulationConfigFromUI());
+        });
+
+        // 3) 首屏：出厂默认值 → 唯一真值 → 回写状态栏与储能容量只读字段
+        const first = ParameterManager.syncSchemeFromUI();
+        if (!first.ok) {
+            log('出厂默认方案参数异常（' + first.message + '），已回退到内置默认值', 'warn');
+            ParameterManager.setCurrentScheme(ParameterManager.DEFAULT_SCHEME);
+            ParameterManager.syncSchemeToUI();
+        } else {
+            ParameterManager.syncSchemeToUI(first.scheme);
+        }
+        ParameterManager.syncSimulationConfigFromUI();
+
+        log(`参数体系就绪（V2.2）：当前方案 ${ParameterManager.schemeKey(ParameterManager.getCurrentScheme())}`);
+    }
+
+    /** 刷新「当前方案状态栏」，并同步优化页的基准方案显示与变量「当前值」列 */
+    function updateSchemeStatusUI(scheme) {
+        ParameterManager.renderSchemeStatus(scheme);
+        refreshOptimizationBaselineUI();
+    }
+
+    /**
+     * 开始仿真计算 —— V2.2：只计算「当前方案」这一个方案（任务书 §7 / §10）。
+     *
+     * 容量来自 AppState.currentScheme，运行规则来自 AppState.simulationConfig，
+     * 二者分别对应 runSingleSimulation 的第 3、4 个参数，不再混在同一个对象里（§12 / §13）。
+     * 多组容量组合的批量计算已迁至独立的「批量计算」页（§40）。
+     */
+    async function startSimulation() {
         if (!AppState.inputData || AppState.inputData.length === 0) {
             alert('请先选择并加载 input.xlsx 文件！');
             return;
         }
 
-        const params = getSimulationParams();
+        // UI → 唯一真值（任务书 §10 / §38）
+        const sres = ParameterManager.syncSchemeFromUI();
+        if (!sres.ok) { alert('方案参数非法：\n' + sres.message); return; }
+        const scheme = sres.scheme;
+        const simulationConfig = getSimulationConfig();
 
-        const spValues = Utils.getValues(
-            Utils.toNum(document.getElementById('storagePowerMin').value),
-            Utils.toNum(document.getElementById('storagePowerMax').value),
-            Utils.toNum(document.getElementById('storagePowerStep').value)
-        );
-        const sdValues = Utils.getValues(
-            Utils.toNum(document.getElementById('storageDurationMin').value),
-            Utils.toNum(document.getElementById('storageDurationMax').value),
-            Utils.toNum(document.getElementById('storageDurationStep').value)
-        );
-        const ecValues = Utils.getValues(
-            Utils.toNum(document.getElementById('electrolyzerMin').value),
-            Utils.toNum(document.getElementById('electrolyzerMax').value),
-            Utils.toNum(document.getElementById('electrolyzerStep').value)
-        );
+        const vres = ParameterManager.validateSimulationConfig(simulationConfig);
+        if (!vres.ok) log('运行参数提示：' + vres.message, 'warn');
+        (sres.warnings || []).forEach(w => log('提示：' + w, 'warn'));
 
-        log(`开始仿真计算: 储能功率[${spValues}], 储能时长[${sdValues}], 电解槽容量[${ecValues}]`);
+        log(`开始仿真计算：${ParameterManager.schemeLabel(scheme)}（方案编号 ${ParameterManager.schemeKey(scheme)}）`);
 
         // 转换为 TypedArray
         const pvArr = new Float64Array(AppState.inputData.length);
@@ -215,114 +272,34 @@
         document.getElementById('workerStatus').classList.add('calculating');
         document.getElementById('workerStatusText').textContent = '计算中...';
 
-        // 尝试使用 Web Worker，回退到主线程
-        try {
-            const workerCode = `
-                ${document.querySelector('script[src="js/simulation-engine.js"]')?.textContent || ''}
-                // Inline the worker code
-                ${runSingleSimulation.toString()}
-                self.onmessage = function(e) {
-                    const { type, params, pvData, windData, spValues, sdValues, ecValues } = e.data;
-                    if (type !== 'simulate') return;
-
-                    const totalCombinations = spValues.length * sdValues.length * ecValues.length;
-                    self.postMessage({ type: 'log', msg: '共有 ' + totalCombinations + ' 种参数组合需要计算' });
-
-                    const allResults = [];
-                    let completed = 0;
-                    for (const sp of spValues) {
-                        for (const sd of sdValues) {
-                            for (const ec of ecValues) {
-                                completed++;
-                                const progress = (completed / totalCombinations) * 100;
-                                self.postMessage({ type: 'progress', progress, msg: '正在计算第 ' + completed + '/' + totalCombinations + ' 种组合...' });
-                                const result = runSingleSimulation(pvData, windData, params, sp, sd, ec);
-                                allResults.push(result);
-                            }
-                        }
-                    }
-                    self.postMessage({ type: 'complete', results: allResults });
-                };
-            `;
-
-            // 由于 Worker 不能直接引用外部脚本，我们在主线程直接计算
-            runSimulationMainThread(params, pvArr, windArr, spValues, sdValues, ecValues);
-        } catch (err) {
-            runSimulationMainThread(params, pvArr, windArr, spValues, sdValues, ecValues);
-        }
+        // 单方案 8760 小时仿真耗时在毫秒级，直接在主线程计算即可（V2.1 的批量分片调度与内联 Worker 代码已删除）
+        setTimeout(() => {
+            try {
+                const result = runSingleSimulation(pvArr, windArr, scheme, simulationConfig);
+                onSimulationComplete([result]);
+            } catch (err) {
+                log('仿真计算失败：' + err.message, 'error');
+                resetSimulationUI();
+                setStatus('计算失败');
+            }
+        }, 0);
     }
 
-    function runSimulationMainThread(params, pvData, windData, spValues, sdValues, ecValues) {
-        const totalCombinations = spValues.length * sdValues.length * ecValues.length;
-        log(`共有 ${totalCombinations} 种参数组合需要计算`);
-
-        const allResults = [];
-        let completed = 0;
-        let cancelled = false;
-
-        function processNext() {
-            if (cancelled) return;
-
-            const startTime = performance.now();
-
-            // 每次处理一个组合
-            if (completed >= totalCombinations) {
-                onSimulationComplete(allResults);
-                return;
-            }
-
-            // 找到当前组合
-            let idx = completed;
-            let spIdx = 0, sdIdx = 0, ecIdx = 0;
-            for (spIdx = 0; spIdx < spValues.length && idx >= spValues.length * sdValues.length * ecValues.length; spIdx++) {}
-            // 简化：用三层循环
-            let ci = 0;
-            outer:
-            for (const sp of spValues) {
-                for (const sd of sdValues) {
-                    for (const ec of ecValues) {
-                        if (ci === completed) {
-                            const result = runSingleSimulation(pvData, windData, params, sp, sd, ec);
-                            allResults.push(result);
-                            completed++;
-                            const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-
-                            document.getElementById('progressFill').style.width = `${(completed / totalCombinations) * 100}%`;
-                            document.getElementById('progressText').textContent = `方案 ${completed}/${totalCombinations} (储能${sp}MW×${sd}h, 电解槽${ec}MW)`;
-                            document.getElementById('progressPercent').textContent = `${(completed / totalCombinations * 100).toFixed(0)}%`;
-
-                            if (completed % Math.max(1, Math.floor(totalCombinations / 20)) === 0 || completed === totalCombinations) {
-                                log(`[${elapsed}s] 已完成 ${completed}/${totalCombinations} (${(completed / totalCombinations * 100).toFixed(0)}%)`);
-                            }
-
-                            setTimeout(processNext, 0); // 让UI有机会刷新
-                            return;
-                        }
-                        ci++;
-                    }
-                }
-            }
-        }
-
-        // 保存取消回调
-        AppState._cancelSimulation = () => { cancelled = true; };
-
-        processNext();
-    }
-
+    /**
+     * 取消计算。
+     * V2.2 的单方案仿真在毫秒级完成，已不存在「分批可中断」的长任务；
+     * 多组容量组合的批量计算页有各自的取消逻辑。此处仅保留为 UI 复位入口。
+     */
     function cancelSimulation() {
-        if (AppState._cancelSimulation) {
-            AppState._cancelSimulation();
-            log('已取消计算', 'warn');
-            resetSimulationUI();
-        }
+        log('当前为单方案计算（毫秒级完成），无需取消', 'warn');
+        resetSimulationUI();
     }
 
     function onSimulationComplete(results) {
         AppState.simulationResults = results;
         log(`仿真计算完成！共 ${results.length} 个方案`, 'success');
 
-        // 填充方案选择器
+        // 填充方案选择器（方案编号统一取自结果自带的 scheme，§48 / §49）
         const sel = document.getElementById('schemeSelect');
         const chartSel = document.getElementById('chartSchemeSelect');
         sel.innerHTML = '';
@@ -330,7 +307,10 @@
 
         results.forEach((r, i) => {
             const sv = r.systemVars;
-            const optText = `方案${i + 1}: 电解槽${sv['电解槽容量（MW）']}MW, 储能${sv['储能功率（MW）']}MW×${sv['储能时长（小时）']}h`;
+            const label = r.scheme
+                ? ParameterManager.schemeKey(r.scheme)
+                : `方案${i + 1}`;
+            const optText = `${label}: 电解槽${sv['电解槽容量（MW）']}MW, 储能${sv['储能功率（MW）']}MW×${sv['储能时长（小时）']}h`;
             sel.innerHTML += `<option value="${i}">${optText}</option>`;
             chartSel.innerHTML += `<option value="${i}">${optText}</option>`;
         });
@@ -556,8 +536,8 @@
     function generateSummary() {
         if (AppState.simulationResults.length === 0) return;
 
-        const params = getSimulationParams();
-        AppState.summaryData = DataSummary.generateSummary(AppState.simulationResults, params.PV_CAPACITY, params.WIND_CAPACITY);
+        // 容量取自每个结果自带的 scheme（§48），不再由调用方另外传一份容量造成第二处真值
+        AppState.summaryData = DataSummary.generateSummary(AppState.simulationResults, AppState.currentScheme);
 
         // 显示汇总表
         const table = document.getElementById('summaryTable');
@@ -968,6 +948,15 @@
         { key: 'electrolyzerCapacity', min: 'optElectrolyzerMin', max: 'optElectrolyzerMax', step: 'optElectrolyzerStep', levels: 'optElectrolyzerLevels' },
     ];
 
+    /** 变量「当前值」列的 DOM 映射（只读，数据来自 AppState.currentScheme，§26） */
+    const OPT_CURRENT_DOM = {
+        windCapacity: 'optCurrentWind',
+        pvCapacity: 'optCurrentPv',
+        storagePower: 'optCurrentStoragePower',
+        storageDuration: 'optCurrentStorageDuration',
+        electrolyzerCapacity: 'optCurrentElectrolyzer',
+    };
+
     /** 数值格式化（非有限值统一显示为 —，绝不出现 Infinity / NaN 字样） */
     function optNum(v, d) {
         if (v === null || v === undefined || !isFinite(Number(v))) return '—';
@@ -1038,14 +1027,17 @@
         };
     }
 
+    /**
+     * 基准方案唯一来源：AppState.currentScheme（任务书 §16 / §17 / §18）。
+     *
+     * V2.1 存在两处问题，均已删除：
+     *   ① baseWind / basePv / baseStoragePower / baseStorageDuration / baseElectrolyzer
+     *      一整套独立输入框——优化页自己维护了第二套「当前方案」；
+     *   ② 把 storagePowerMin / storageDurationMin / electrolyzerMin（**扫描范围的下界**）
+     *      当成基准值读取——语义错误。
+     */
     function readBaselineScheme() {
-        return {
-            windCapacity: Utils.toNum(optEl('baseWind').value, 0),
-            pvCapacity: Utils.toNum(optEl('basePv').value, 0),
-            storagePower: Utils.toNum(optEl('baseStoragePower').value, 0),
-            storageDuration: Utils.toNum(optEl('baseStorageDuration').value, 0),
-            electrolyzerCapacity: Utils.toNum(optEl('baseElectrolyzer').value, 0),
-        };
+        return ParameterManager.getCurrentScheme();
     }
 
     /** 权重合计实时显示 */
@@ -1057,9 +1049,10 @@
         el.style.color = Math.abs(sum - 100) < 1e-6 ? 'var(--accent-cyan)' : 'var(--accent-yellow)';
     }
 
-    /** 变量范围 → 档位数 / 搜索空间实时预览 */
+    /** 变量范围 → 档位数 / 搜索空间 / 当前值 / 范围外提示（任务书 §26 / §27） */
     function updateOptVarPreview() {
         const variables = readOptVariableConfig();
+        const scheme = ParameterManager.getCurrentScheme();
         let space = 1;
         for (const v of OPT_VARS) {
             const cfg = variables[v.key];
@@ -1069,21 +1062,70 @@
             }
             optEl(v.levels).textContent = n > 0 ? n : '—';
             space *= Math.max(1, n);
+
+            // 「当前值」列：只读显示，来自 AppState.currentScheme（§26）
+            const curEl = optEl(OPT_CURRENT_DOM[v.key]);
+            if (curEl) {
+                const cur = scheme[v.key];
+                const unit = ParameterManager.SCHEME_UNITS[v.key];
+                const inRange = isFinite(cfg.min) && isFinite(cfg.max) && cur >= cfg.min && cur <= cfg.max;
+                curEl.textContent = String(cur);
+                curEl.classList.toggle('is-out-range', !inRange);
+                curEl.title = ParameterManager.SCHEME_LABELS[v.key] + ' 当前值 ' + cur + unit +
+                    '，优化范围 ' + cfg.min + ' ~ ' + cfg.max + unit +
+                    (inRange ? '（在范围内）' : '（超出范围）');
+            }
         }
         const pop = Math.round(Utils.toNum(optEl('optPopulationSize').value, 60));
         optEl('optSearchSpace').innerHTML =
             `搜索空间：<b>${space.toLocaleString('zh-CN')}</b> 个容量组合` +
             (space < pop ? `（小于种群规模 ${pop}，将自动收缩有效种群规模）` : '');
+
+        renderOptRangeWarn(scheme, variables);
     }
 
-    /** 从「电量计算」页读取当前手工方案作为基准方案 */
-    function loadBaselineFromSimulationPage(silent) {
-        optEl('basePv').value = Utils.toNum(optEl('pvCapacity').value, 360);
-        optEl('baseWind').value = Utils.toNum(optEl('windCapacity').value, 200);
-        optEl('baseStoragePower').value = Utils.toNum(optEl('storagePowerMin').value, 100);
-        optEl('baseStorageDuration').value = Utils.toNum(optEl('storageDurationMin').value, 2);
-        optEl('baseElectrolyzer').value = Utils.toNum(optEl('electrolyzerMin').value, 160);
-        if (!silent) optLog('已读取「电量计算」页当前参数作为基准方案（Baseline）', 'success');
+    /**
+     * 「当前基准方案是否落在优化搜索范围内」提示（任务书 §27 / §28）。
+     * 只提示，**绝不自动修改**用户输入的任何数值。
+     */
+    function renderOptRangeWarn(scheme, variables) {
+        const el = optEl('optRangeWarn');
+        if (!el) return;
+        const res = ParameterManager.checkBaselineInRange(scheme, { variables: variables });
+        if (res.inRange) {
+            el.style.display = 'none';
+            el.innerHTML = '';
+            return;
+        }
+        const out = res.items.filter(it => !it.inRange);
+        el.style.display = '';
+        el.innerHTML =
+            '<span class="opt-range-warn-title">⚠ 当前基准方案不在优化搜索空间内</span>' +
+            '<ul>' + out.map(it => `<li class="is-out">${it.text}</li>`).join('') + '</ul>' +
+            '<button class="btn btn-sm btn-outline" id="btnExpandOptRange" type="button">将优化范围包含基准方案</button>' +
+            '<span class="hint" style="margin-left:8px">可选操作；不点击则不会改动任何数值</span>';
+    }
+
+    /** 「将优化范围包含基准方案」（§27 可选功能）：只扩张区间，不改步长，且必须用户主动点击 */
+    function expandOptRangeToBaseline() {
+        const scheme = ParameterManager.getCurrentScheme();
+        const next = ParameterManager.expandRangeToIncludeBaseline(scheme, { variables: readOptVariableConfig() });
+        for (const v of OPT_VARS) {
+            optEl(v.min).value = next.variables[v.key].min;
+            optEl(v.max).value = next.variables[v.key].max;
+        }
+        updateOptVarPreview();
+        optLog('已将优化范围扩张到包含基准方案（基准方案本身未做任何修改）', 'success');
+    }
+
+    /**
+     * 刷新优化页的「基准方案」显示与变量「当前值」列。
+     * V2.2：基准方案不再有一套独立输入框，直接显示 AppState.currentScheme（§18 / §39）。
+     */
+    function refreshOptimizationBaselineUI() {
+        const scheme = ParameterManager.getCurrentScheme();
+        ParameterManager.renderSchemeStatus(scheme);
+        updateOptVarPreview();
     }
 
     // -------------------- 上下文组装 --------------------
@@ -1099,11 +1141,13 @@
             pvData[i] = AppState.inputData[i].pv;
             windData[i] = AppState.inputData[i].wind;
         }
-        // 字段名必须与 OptimizationEngine 的上下文约定一致（pvData / windData）
+        // 字段名必须与 OptimizationEngine 的上下文约定一致（pvData / windData / simulationConfig）
+        // 任务书 §35 / §36：上下文中只允许出现「数据 + 运行参数 + 单价 + 财务参数」，
+        // 容量一律通过 evaluateScheme 的 scheme 参数传入，禁止再经由上下文夹带。
         return {
             pvData: pvData,
             windData: windData,
-            simParams: getSimulationParams(),
+            simulationConfig: getSimulationConfig(),
             prices: getEstimatePrices(),
             financeParams: getFinanceParams(),
             lcohDiscountRate: Utils.toNum(optEl('optLcohDiscount').value, 5.0),
@@ -1131,8 +1175,18 @@
         // 按钮
         optEl('btnRunOptimization').addEventListener('click', startOptimization);
         optEl('btnStopOptimization').addEventListener('click', stopOptimization);
-        optEl('btnLoadBaseline').addEventListener('click', () => loadBaselineFromSimulationPage(false));
+        // V2.2：基准方案 ＝「电量计算」页的当前方案，此按钮只做页面跳转，不再复制一套输入框（§16 / §18）
+        optEl('btnLoadBaseline').addEventListener('click', () => {
+            const tabBtn = document.querySelector('.tab-btn[data-tab="simulation"]');
+            if (tabBtn) tabBtn.click();
+            optLog('已切换到「电量计算」页：修改当前方案后，基准方案会自动同步', 'info');
+        });
         optEl('btnExportOptimization').addEventListener('click', exportOptimizationExcel);
+
+        // 「将优化范围包含基准方案」按钮（内容动态渲染，使用事件委托）
+        optEl('optRangeWarn').addEventListener('click', (e) => {
+            if (e.target && e.target.id === 'btnExpandOptRange') expandOptRangeToBaseline();
+        });
         optEl('btnLoadRecommendedToSim').addEventListener('click', () => {
             if (!OptState.result || !OptState.result.representativeSolutions.recommended) return;
             applySchemeToSimulation(OptState.result.representativeSolutions.recommended, false);
@@ -1184,15 +1238,16 @@
             optTabBtn.addEventListener('click', () => setTimeout(refreshOptChartsForVisibleTab, 30));
         }
 
-        // 初始化基准方案（静默）
-        loadBaselineFromSimulationPage(true);
-        optLog('方案优化模块已加载：请先在「电量计算」页加载数据并确认参数，再回到本页开始优化');
+        // 初始化基准方案与「当前值」列：直接读取 AppState.currentScheme（唯一真值，§18）
+        refreshOptimizationBaselineUI();
+        optLog('方案优化模块已加载：基准方案自动取自「电量计算」页的当前方案；请先加载数据并确认基准，再设置搜索范围');
     }
 
     function startOptimization() {
         if (OptState.running) return;
 
         // 1. 组装并校验配置
+        //    baseline 唯一来源 = AppState.currentScheme（任务书 §16 / §18），不再有独立输入框
         let config;
         try {
             config = OptimizationEngine.normalizeConfig({
@@ -1212,6 +1267,15 @@
         if (!vres.ok) {
             alert('优化参数非法：\n' + vres.message);
             return;
+        }
+
+        // 把本次搜索配置写入 ParameterManager，供全项目以统一接口读取（§6 / §23）
+        ParameterManager.setOptimizationConfig(config);
+
+        // 基准方案不在搜索范围内时只提示，不阻断（§28）
+        const rangeRes = ParameterManager.checkBaselineInRange(config.baseline, config);
+        if (!rangeRes.inRange) {
+            optLog('提示：当前基准方案不在优化搜索空间内，优化结果可能不包含基准方案本身', 'warn');
         }
 
         // 2. 组装运行上下文
@@ -1322,7 +1386,7 @@
                 context: {
                     pvData: ctx.pvData,
                     windData: ctx.windData,
-                    simParams: ctx.simParams,
+                    simulationConfig: ctx.simulationConfig,
                     prices: ctx.prices,
                     financeParams: ctx.financeParams,
                     lcohDiscountRate: ctx.lcohDiscountRate,
@@ -1891,21 +1955,14 @@
             return;
         }
 
-        optEl('pvCapacity').value = sc.pvCapacity;
-        optEl('windCapacity').value = sc.windCapacity;
+        // 唯一写入路径：setCurrentScheme → syncSchemeToUI（任务书 §19 / §33）
+        // 候选方案只是候选；只有用户点击「应用」才允许修改当前方案（§32）
+        const res = ParameterManager.setCurrentScheme(sc);
+        if (!res.ok) { alert('方案参数非法：\n' + res.message); return; }
+        ParameterManager.syncSchemeToUI(res.scheme);
+        refreshOptimizationBaselineUI();
 
-        // 扫描范围收敛为单点，确保复核的就是该方案本身
-        optEl('storagePowerMin').value = sc.storagePower;
-        optEl('storagePowerMax').value = sc.storagePower;
-        optEl('storagePowerStep').value = 0;
-        optEl('storageDurationMin').value = sc.storageDuration;
-        optEl('storageDurationMax').value = sc.storageDuration;
-        optEl('storageDurationStep').value = 0;
-        optEl('electrolyzerMin').value = sc.electrolyzerCapacity;
-        optEl('electrolyzerMax').value = sc.electrolyzerCapacity;
-        optEl('electrolyzerStep').value = 0;
-
-        optLog(`已将方案（风电 ${sc.windCapacity}MW / 光伏 ${sc.pvCapacity}MW / 储能 ${sc.storagePower}MW×${sc.storageDuration}h / 电解槽 ${sc.electrolyzerCapacity}MW）载入「电量计算」页` +
+        optLog(`已应用方案 ${ParameterManager.schemeKey(res.scheme)}（${ParameterManager.schemeLabel(res.scheme)}）到「当前方案」` +
             (doRun ? '，正在运行 8760 小时复核仿真...' : '，请点击「开始仿真计算」运行复核'), 'success');
 
         const tabBtn = document.querySelector('.tab-btn[data-tab="simulation"]');
@@ -1952,18 +2009,283 @@
         }
     }
 
+    // ==================================================================
+    // ========== 批量计算模块（V2.2 从「电量计算」主参数区独立出来）==========
+    // ==================================================================
+    //
+    // 任务书 §7 / §40：多组容量组合的扫描不再混入「电量计算」的主参数区，
+    // 单独成为「批量计算」页，并且按钮文案与「当前方案」彻底区分。
+    //   · 只产生 schemeList[]，**绝不修改 AppState.currentScheme**；
+    //   · 运行参数沿用「电量计算」页的设置；
+    //   · 需要把某一组设为当前方案时，必须由用户主动点击（§32）。
+
+    const BATCH_VARS = [
+        { key: 'windCapacity',         min: 'batchWindMin',         max: 'batchWindMax',         step: 'batchWindStep',         levels: 'batchWindLevels' },
+        { key: 'pvCapacity',           min: 'batchPvMin',           max: 'batchPvMax',           step: 'batchPvStep',           levels: 'batchPvLevels' },
+        { key: 'storagePower',         min: 'batchStoragePowerMin', max: 'batchStoragePowerMax', step: 'batchStoragePowerStep', levels: 'batchStoragePowerLevels' },
+        { key: 'storageDuration',      min: 'batchStorageDurationMin', max: 'batchStorageDurationMax', step: 'batchStorageDurationStep', levels: 'batchStorageDurationLevels' },
+        { key: 'electrolyzerCapacity', min: 'batchElectrolyzerMin', max: 'batchElectrolyzerMax', step: 'batchElectrolyzerStep', levels: 'batchElectrolyzerLevels' },
+    ];
+
+    const BatchState = {
+        running: false,
+        cancelled: false,
+        schemes: [],
+        results: [],
+        _cancel: null,
+    };
+
+    function readBatchVariables() {
+        const out = {};
+        for (const v of BATCH_VARS) {
+            out[v.key] = {
+                min: Utils.toNum(optEl(v.min).value, NaN),
+                max: Utils.toNum(optEl(v.max).value, NaN),
+                step: Utils.toNum(optEl(v.step).value, NaN),
+            };
+        }
+        return out;
+    }
+
+    function updateBatchPreview() {
+        const vars = readBatchVariables();
+        let space = 1;
+        for (const v of BATCH_VARS) {
+            const cfg = vars[v.key];
+            const n = (isFinite(cfg.min) && isFinite(cfg.max))
+                ? ParameterManager.countLevels(cfg.min, cfg.max, cfg.step)
+                : 0;
+            optEl(v.levels).textContent = n > 0 ? n : '—';
+            space *= Math.max(1, n);
+        }
+        optEl('batchSearchSpace').innerHTML = `搜索空间：<b>${space.toLocaleString('zh-CN')}</b> 个方案`;
+        return space;
+    }
+
+    function initBatch() {
+        for (const v of BATCH_VARS) {
+            for (const id of [v.min, v.max, v.step]) {
+                const el = optEl(id);
+                if (el) el.addEventListener('input', updateBatchPreview);
+            }
+        }
+        optEl('btnRunBatch').addEventListener('click', runBatch);
+        optEl('btnCancelBatch').addEventListener('click', cancelBatch);
+        optEl('btnExportBatchSchemes').addEventListener('click', exportBatchSchemes);
+
+        // 「设为当前方案」按钮（行内动态渲染，使用事件委托）
+        optEl('batchTable').addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-batch-act]');
+            if (!btn) return;
+            const s = BatchState.results[parseInt(btn.dataset.idx, 10)];
+            if (s && s.scheme) applyBatchScheme(s.scheme);
+        });
+
+        updateBatchPreview();
+    }
+
+    function runBatch() {
+        if (BatchState.running) return;
+        if (!AppState.inputData || AppState.inputData.length === 0) {
+            alert('请先在「电量计算」页加载 input.xlsx 文件！（两个页面共用同一份数据）');
+            return;
+        }
+
+        const vars = readBatchVariables();
+        const bad = [];
+        for (const v of BATCH_VARS) {
+            const cfg = vars[v.key];
+            if (!isFinite(cfg.min) || !isFinite(cfg.max)) bad.push(ParameterManager.SCHEME_LABELS[v.key] + '：范围必须为有效数值');
+            else if (cfg.min > cfg.max) bad.push(ParameterManager.SCHEME_LABELS[v.key] + '：最小值不能大于最大值');
+            if (!isFinite(cfg.step) || cfg.step < 0) bad.push(ParameterManager.SCHEME_LABELS[v.key] + '：步长不能为负');
+        }
+        if (bad.length) { alert('批量计算参数非法：\n' + bad.join('\n')); return; }
+
+        const schemes = ParameterManager.createBatchSchemes(vars);
+        if (schemes.length === 0) { alert('搜索空间为空，请检查扫描范围与步长'); return; }
+        if (schemes.length > 2000 && !confirm(`将计算 ${schemes.length} 个方案，可能耗时较久，是否继续？`)) return;
+
+        // 运行参数沿用「电量计算」页设置（批量计算不引入第二套运行参数）
+        const simulationConfig = getSimulationConfig();
+        const n = AppState.inputData.length;
+        const pvArr = new Float64Array(n);
+        const windArr = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            pvArr[i] = AppState.inputData[i].pv;
+            windArr[i] = AppState.inputData[i].wind;
+        }
+
+        BatchState.running = true;
+        BatchState.cancelled = false;
+        BatchState.schemes = schemes;
+        BatchState.results = [];
+
+        optEl('btnRunBatch').style.display = 'none';
+        optEl('btnCancelBatch').style.display = '';
+        optEl('batchProgressContainer').style.display = '';
+        optEl('batchProgressFill').style.width = '0%';
+        optEl('batchProgressText').textContent = '准备中...';
+        optEl('batchProgressPercent').textContent = '0%';
+        optEl('btnExportBatchSchemes').disabled = true;
+        optEl('batchSummaryText').textContent = '计算中...';
+        renderBatchTable();
+
+        log(`【批量】开始批量计算：共 ${schemes.length} 个方案（运行参数沿用「电量计算」页设置，不修改当前方案）`);
+
+        let i = 0;
+        const CHUNK_MS = 40;
+        BatchState._cancel = () => { BatchState.cancelled = true; };
+
+        const step = () => {
+            if (BatchState.cancelled) { finishBatch(true); return; }
+            const t0 = performance.now();
+            try {
+                while (i < schemes.length && (performance.now() - t0) < CHUNK_MS) {
+                    BatchState.results.push(runSingleSimulation(pvArr, windArr, schemes[i], simulationConfig));
+                    i++;
+                }
+            } catch (err) {
+                log('【批量】计算失败：' + err.message, 'error');
+                finishBatch(true);
+                return;
+            }
+            const pct = (i / schemes.length) * 100;
+            optEl('batchProgressFill').style.width = pct.toFixed(1) + '%';
+            optEl('batchProgressText').textContent = `已完成 ${i}/${schemes.length} 个方案`;
+            optEl('batchProgressPercent').textContent = pct.toFixed(0) + '%';
+            if (i < schemes.length) setTimeout(step, 0);   // 让出主线程，页面保持响应
+            else finishBatch(false);
+        };
+        setTimeout(step, 0);
+    }
+
+    function finishBatch(cancelled) {
+        BatchState.running = false;
+        BatchState._cancel = null;
+        optEl('btnRunBatch').style.display = '';
+        optEl('btnCancelBatch').style.display = 'none';
+        if (cancelled) optEl('batchProgressContainer').style.display = 'none';
+        optEl('btnExportBatchSchemes').disabled = BatchState.results.length === 0;
+
+        if (cancelled) {
+            optEl('batchSummaryText').textContent = `已取消（完成 ${BatchState.results.length} 个）`;
+            log(`【批量】已取消，完成 ${BatchState.results.length} 个方案`, 'warn');
+        } else {
+            optEl('batchSummaryText').textContent = `完成 ${BatchState.results.length} 个方案`;
+            log(`【批量】批量计算完成，共 ${BatchState.results.length} 个方案`, 'success');
+        }
+        renderBatchTable();
+    }
+
+    function cancelBatch() {
+        if (BatchState._cancel) {
+            BatchState._cancel();
+            log('【批量】已请求取消...', 'warn');
+        }
+    }
+
+    function renderBatchTable() {
+        const tbody = optEl('batchTable').querySelector('tbody');
+        if (!tbody) return;
+        const curKey = ParameterManager.schemeKey(ParameterManager.getCurrentScheme());
+
+        if (BatchState.results.length === 0) {
+            tbody.innerHTML = BatchState.schemes.length > 0
+                ? `<tr><td colspan="10" class="batch-empty">正在计算，共 ${BatchState.schemes.length} 个方案…</td></tr>`
+                : '<tr><td colspan="10" class="batch-empty">设置扫描范围后点击「开始批量计算」</td></tr>';
+            return;
+        }
+
+        // 汇总复用 data-summary（容量取自每个结果自带的 scheme）
+        const summary = DataSummary.generateSummary(BatchState.results, ParameterManager.getCurrentScheme());
+
+        let html = '';
+        BatchState.results.forEach((r, i) => {
+            const s = r.scheme;
+            const key = ParameterManager.schemeKey(s);
+            const row = summary[i] || {};
+            const isCur = (key === curKey);
+            const h2 = row['制氢量总和（万吨）'];
+            const curt = row['弃电电量比例'];
+            html += `<tr class="${isCur ? 'is-current' : ''}">
+                <td>${i + 1}</td>
+                <td>${key}</td>
+                <td class="batch-num">${s.windCapacity}</td>
+                <td class="batch-num">${s.pvCapacity}</td>
+                <td class="batch-num">${s.storagePower} / ${s.storageDuration}</td>
+                <td class="batch-num">${s.storageEnergy}</td>
+                <td class="batch-num">${s.electrolyzerCapacity}</td>
+                <td class="batch-num">${h2 === undefined ? '—' : h2}</td>
+                <td class="batch-num">${curt === undefined ? '—' : curt}</td>
+                <td>${isCur
+                    ? '<span class="hint">＝当前方案</span>'
+                    : `<button class="btn btn-sm btn-outline" data-batch-act="apply" data-idx="${i}" type="button">设为当前方案</button>`}</td>
+            </tr>`;
+        });
+        tbody.innerHTML = html;
+    }
+
+    /**
+     * 把批量计算中的某一组设为「当前方案」（任务书 §40）。
+     * 批量计算本身绝不修改当前方案，只有用户主动点击才写入。
+     */
+    function applyBatchScheme(scheme) {
+        const res = ParameterManager.setCurrentScheme(scheme);
+        if (!res.ok) { alert('方案参数非法：\n' + res.message); return; }
+        ParameterManager.syncSchemeToUI(res.scheme);
+        refreshOptimizationBaselineUI();
+        renderBatchTable();
+        log(`【批量】已将 ${ParameterManager.schemeKey(res.scheme)} 设为当前方案，正在运行 8760 小时仿真...`, 'success');
+
+        const tabBtn = document.querySelector('.tab-btn[data-tab="simulation"]');
+        if (tabBtn) tabBtn.click();
+        startSimulation();
+    }
+
+    async function exportBatchSchemes() {
+        if (BatchState.results.length === 0) return;
+        try {
+            const summary = DataSummary.generateSummary(BatchState.results, ParameterManager.getCurrentScheme());
+            const clean = summary.map((row, i) => {
+                const o = { '方案编号': ParameterManager.schemeKey(BatchState.results[i].scheme) };
+                for (const k of Object.keys(row)) {
+                    if (!k.startsWith('_')) o[k] = row[k];
+                }
+                return o;
+            });
+            const buffer = await ExcelIO.exportSummaryExcel(clean);
+            const blob = new Blob([buffer], { type: 'application/octet-stream' });
+            Utils.downloadBlob(blob, `批量方案清单_${Utils.timestamp()}.xlsx`);
+            log('【批量】已导出方案清单 Excel', 'success');
+        } catch (err) {
+            log('【批量】导出失败：' + err.message, 'error');
+        }
+    }
+
     // ========== 初始化 ==========
     function init() {
         initTabs();
+
+        // 参数层必须先于其他模块初始化：它是 AppState.currentScheme 的唯一来源（§20 / §21）
+        if (typeof ParameterManager === 'undefined') {
+            log('⚠ 参数管理器未加载（js/parameter-manager.js），参数体系不可用', 'error');
+            return;
+        }
+        initParameterLayer();
+
         initSimulation();
         initEstimate();
         initFinance();
         initOptimization();
+        initBatch();
 
         document.getElementById('btnClearLog').addEventListener('click', clearLog);
 
-        log('多能互补风光储氢分析软件 WEB-V2.1 已就绪（NSGA-II 多目标容量优化）', 'success');
-        log('V1.0 功能与计算逻辑完全保留；V2.1 新增「方案优化」页：NSGA-II 自动搜索风光储氢 Pareto 最优方案');
+        log('多能互补风光储氢分析软件 WEB-V2.2 已就绪（参数体系统一 + NSGA-II 多目标容量优化）', 'success');
+        log('V2.2 参数体系：一个参数、一个定义、一个数据源、一个传递路径');
+        log('　· 当前方案（风电/光伏/储能功率/储能时长/电解槽）唯一定义在「电量计算」页，优化页的基准方案直接读取它');
+        log('　· 优化范围与工程约束只用于搜索，不参与单方案计算，也不会改变当前方案');
+        log('　· 多组容量组合的批量扫描已独立为「批量计算」页');
         log('请先选择 input.xlsx 文件，然后配置参数并运行仿真计算');
 
         // 检查依赖库

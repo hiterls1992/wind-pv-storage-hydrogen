@@ -12,7 +12,7 @@
         <div class="header-left">
             <span class="logo">⚡</span>
             <h1>多能互补系统仿真计算平台</h1>
-            <span class="version">WEB-V2.1</span>
+            <span class="version">WEB-V2.2</span>
             <span style="font-size:11px;color:#5a6a8a;letter-spacing:0;margin-left:6px">作者：hiterls1992</span>
         </div>
         <div class="header-right">
@@ -27,6 +27,7 @@
         <button class="tab-btn" data-tab="estimate">💰 概算分析</button>
         <button class="tab-btn" data-tab="finance">📊 经济评价</button>
         <button class="tab-btn" data-tab="optimization">🎯 方案优化</button>
+        <button class="tab-btn" data-tab="batch">📦 批量计算</button>
     </nav>
 
     <!-- 主内容区域 -->
@@ -49,53 +50,50 @@
                         <div class="file-info" id="fileInfo"></div>
                     </div>
 
+                    <!-- ② 当前方案（方案参数 Scheme）——「建多大」。全项目容量参数的唯一定义处 -->
                     <div class="param-section">
-                        <h3>🔧 扫描参数范围</h3>
-                        <div class="param-grid">
-                            <div class="param-group">
-                                <label>储能功率 (MW)</label>
-                                <div class="range-inputs">
-                                    <input type="number" id="storagePowerMin" value="100" step="10">
-                                    <span>~</span>
-                                    <input type="number" id="storagePowerMax" value="100" step="10">
-                                    <span>步长</span>
-                                    <input type="number" id="storagePowerStep" value="0" step="10" style="width:60px">
-                                </div>
-                            </div>
-                            <div class="param-group">
-                                <label>储能时长 (小时)</label>
-                                <div class="range-inputs">
-                                    <input type="number" id="storageDurationMin" value="2" step="1">
-                                    <span>~</span>
-                                    <input type="number" id="storageDurationMax" value="2" step="1">
-                                    <span>步长</span>
-                                    <input type="number" id="storageDurationStep" value="0" step="1" style="width:60px">
-                                </div>
-                            </div>
-                            <div class="param-group">
-                                <label>电解槽容量 (MW)</label>
-                                <div class="range-inputs">
-                                    <input type="number" id="electrolyzerMin" value="160" step="10">
-                                    <span>~</span>
-                                    <input type="number" id="electrolyzerMax" value="160" step="10">
-                                    <span>步长</span>
-                                    <input type="number" id="electrolyzerStep" value="0" step="10" style="width:60px">
-                                </div>
-                            </div>
+                        <h3>🎯 当前方案</h3>
+                        <div class="scheme-status">
+                            <div class="scheme-status-title">当前计算方案</div>
+                            <div class="scheme-status-text" id="currentSchemeStatusText">—</div>
                         </div>
-                    </div>
-
-                    <div class="param-section">
-                        <h3>⚙️ 系统参数</h3>
                         <div class="param-grid">
-                            <div class="param-row">
-                                <label>光伏容量 (MW)</label>
-                                <input type="number" id="pvCapacity" value="360" step="10">
-                            </div>
                             <div class="param-row">
                                 <label>风电容量 (MW)</label>
-                                <input type="number" id="windCapacity" value="200" step="10">
+                                <input type="number" id="currentWindCapacity" value="200" step="10">
                             </div>
+                            <div class="param-row">
+                                <label>光伏容量 (MW)</label>
+                                <input type="number" id="currentPvCapacity" value="360" step="10">
+                            </div>
+                            <div class="param-row">
+                                <label>储能功率 (MW)</label>
+                                <input type="number" id="currentStoragePower" value="100" step="10">
+                            </div>
+                            <div class="param-row">
+                                <label>储能时长 (h)</label>
+                                <input type="number" id="currentStorageDuration" value="2" step="1">
+                            </div>
+                            <div class="param-row">
+                                <label>储能容量 (MWh)</label>
+                                <input type="text" id="currentStorageEnergy" class="input-readonly" value="200" readonly tabindex="-1"
+                                       title="储能容量 = 储能功率 × 储能时长（自动计算，不可直接输入）">
+                            </div>
+                            <div class="param-row">
+                                <label>电解槽容量 (MW)</label>
+                                <input type="number" id="currentElectrolyzerCapacity" value="160" step="10">
+                            </div>
+                        </div>
+                        <p class="hint">
+                            容量参数全项目唯一定义处：「电量计算」与「方案优化」的基准方案共用这一份数据。<br>
+                            储能容量 = 储能功率 × 储能时长（MWh），为自动计算的派生量，禁止直接输入以免与功率/时长冲突。
+                        </p>
+                    </div>
+
+                    <!-- ③ 运行参数（设备怎么运行）——所有方案共用，不参与容量搜索 -->
+                    <div class="param-section">
+                        <h3>⚙️ 运行参数</h3>
+                        <div class="param-grid">
                             <div class="param-row">
                                 <label>电解槽最低运行比例</label>
                                 <input type="number" id="electrolyzerMinRatio" value="0.3" step="0.05">
@@ -125,6 +123,7 @@
                                 <input type="number" id="hydrogenConsumption" value="55" step="1">
                             </div>
                         </div>
+                        <p class="hint">运行参数决定设备运行规则，全部方案共用；不参与容量搜索，也不是优化变量。</p>
                     </div>
 
                     <div class="param-actions">
@@ -463,10 +462,11 @@
                         <h3>① 优化变量（范围 + 步长）</h3>
                         <div class="opt-var-grid">
                             <div class="opt-var-head">
-                                <span>变量</span><span>最小</span><span>最大</span><span>步长</span><span>档位</span>
+                                <span>变量</span><span>当前值</span><span>最小</span><span>最大</span><span>步长</span><span>档位</span>
                             </div>
                             <div class="opt-var-row">
                                 <label>风电容量 (MW)</label>
+                                <span class="opt-var-current" id="optCurrentWind">—</span>
                                 <input type="number" id="optWindMin" value="50" step="25">
                                 <input type="number" id="optWindMax" value="300" step="25">
                                 <input type="number" id="optWindStep" value="25" step="5">
@@ -474,6 +474,7 @@
                             </div>
                             <div class="opt-var-row">
                                 <label>光伏容量 (MW)</label>
+                                <span class="opt-var-current" id="optCurrentPv">—</span>
                                 <input type="number" id="optPvMin" value="50" step="25">
                                 <input type="number" id="optPvMax" value="500" step="25">
                                 <input type="number" id="optPvStep" value="25" step="5">
@@ -481,6 +482,7 @@
                             </div>
                             <div class="opt-var-row">
                                 <label>储能功率 (MW)</label>
+                                <span class="opt-var-current" id="optCurrentStoragePower">—</span>
                                 <input type="number" id="optStoragePowerMin" value="0" step="25">
                                 <input type="number" id="optStoragePowerMax" value="200" step="25">
                                 <input type="number" id="optStoragePowerStep" value="25" step="5">
@@ -488,6 +490,7 @@
                             </div>
                             <div class="opt-var-row">
                                 <label>储能时长 (h)</label>
+                                <span class="opt-var-current" id="optCurrentStorageDuration">—</span>
                                 <input type="number" id="optStorageDurationMin" value="0" step="1">
                                 <input type="number" id="optStorageDurationMax" value="4" step="1">
                                 <input type="number" id="optStorageDurationStep" value="1" step="1">
@@ -495,14 +498,17 @@
                             </div>
                             <div class="opt-var-row">
                                 <label>电解槽容量 (MW)</label>
+                                <span class="opt-var-current" id="optCurrentElectrolyzer">—</span>
                                 <input type="number" id="optElectrolyzerMin" value="25" step="25">
                                 <input type="number" id="optElectrolyzerMax" value="200" step="25">
                                 <input type="number" id="optElectrolyzerStep" value="25" step="5">
                                 <span class="opt-levels" id="optElectrolyzerLevels">—</span>
                             </div>
                         </div>
+                        <p class="hint">「当前值」为只读显示，来自「电量计算」页的当前方案；「最小/最大/步长」仅用于 NSGA-II 搜索，不参与单方案计算。</p>
                         <p class="hint">储能容量 = 储能功率 × 储能时长（MWh）；所有取值严格落在「最小 + k×步长」上。</p>
                         <p class="hint" id="optSearchSpace">搜索空间：—</p>
+                        <div class="opt-range-warn" id="optRangeWarn" style="display:none"></div>
                     </div>
 
                     <div class="param-section">
@@ -590,14 +596,16 @@
 
                     <div class="param-section">
                         <h3>⑤ 基准方案（Baseline）</h3>
-                        <div class="param-grid">
-                            <div class="param-row"><label>风电容量 (MW)</label><input type="number" id="baseWind" value="200" step="10"></div>
-                            <div class="param-row"><label>光伏容量 (MW)</label><input type="number" id="basePv" value="360" step="10"></div>
-                            <div class="param-row"><label>储能功率 (MW)</label><input type="number" id="baseStoragePower" value="100" step="10"></div>
-                            <div class="param-row"><label>储能时长 (h)</label><input type="number" id="baseStorageDuration" value="2" step="1"></div>
-                            <div class="param-row"><label>电解槽容量 (MW)</label><input type="number" id="baseElectrolyzer" value="160" step="10"></div>
+                        <div class="scheme-status">
+                            <div class="scheme-status-title">基准方案 ＝「电量计算」页的当前方案</div>
+                            <div class="scheme-status-text" id="optBaselineStatusText">—</div>
+                            <div class="scheme-status-key">方案编号：<span id="optBaselineKey">—</span></div>
                         </div>
-                        <button class="btn btn-sm btn-outline" id="btnLoadBaseline" style="margin-top:8px">↻ 读取「电量计算」页当前参数</button>
+                        <p class="hint">
+                            基准方案不在此处重复定义——它直接读取「电量计算」页的当前方案，
+                            用于结果对比与「约束可行性」参照。要修改基准方案，请回「电量计算」页调整。
+                        </p>
+                        <button class="btn btn-sm btn-outline" id="btnLoadBaseline" style="margin-top:8px">↗ 返回「电量计算」修改基准方案</button>
                     </div>
 
                     <div class="param-actions">
@@ -724,6 +732,112 @@
                 </div>
             </div>
         </section>
+        <!-- ==================== 批量计算模块（V2.2：从「电量计算」主参数区独立出来）==================== -->
+        <section class="tab-panel" id="tab-batch">
+            <div class="panel-layout">
+                <!-- 左侧：扫描范围（只产生方案清单，不修改当前方案） -->
+                <aside class="param-panel">
+                    <div class="param-section">
+                        <h3>📁 数据文件</h3>
+                        <div class="file-info" id="batchFileInfo">
+                            请在「电量计算」页加载 input.xlsx（两个页面共用同一份 8760 小时数据）
+                        </div>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>① 扫描变量（范围 + 步长）</h3>
+                        <div class="batch-var-grid">
+                            <div class="batch-var-head">
+                                <span>变量</span><span>最小</span><span>最大</span><span>步长</span><span>档位</span>
+                            </div>
+                            <div class="batch-var-row">
+                                <label>风电容量 (MW)</label>
+                                <input type="number" id="batchWindMin" value="200" step="25">
+                                <input type="number" id="batchWindMax" value="200" step="25">
+                                <input type="number" id="batchWindStep" value="25" step="5">
+                                <span class="opt-levels" id="batchWindLevels">—</span>
+                            </div>
+                            <div class="batch-var-row">
+                                <label>光伏容量 (MW)</label>
+                                <input type="number" id="batchPvMin" value="360" step="25">
+                                <input type="number" id="batchPvMax" value="360" step="25">
+                                <input type="number" id="batchPvStep" value="25" step="5">
+                                <span class="opt-levels" id="batchPvLevels">—</span>
+                            </div>
+                            <div class="batch-var-row">
+                                <label>储能功率 (MW)</label>
+                                <input type="number" id="batchStoragePowerMin" value="100" step="25">
+                                <input type="number" id="batchStoragePowerMax" value="100" step="25">
+                                <input type="number" id="batchStoragePowerStep" value="25" step="5">
+                                <span class="opt-levels" id="batchStoragePowerLevels">—</span>
+                            </div>
+                            <div class="batch-var-row">
+                                <label>储能时长 (h)</label>
+                                <input type="number" id="batchStorageDurationMin" value="2" step="1">
+                                <input type="number" id="batchStorageDurationMax" value="2" step="1">
+                                <input type="number" id="batchStorageDurationStep" value="1" step="1">
+                                <span class="opt-levels" id="batchStorageDurationLevels">—</span>
+                            </div>
+                            <div class="batch-var-row">
+                                <label>电解槽容量 (MW)</label>
+                                <input type="number" id="batchElectrolyzerMin" value="160" step="25">
+                                <input type="number" id="batchElectrolyzerMax" value="160" step="25">
+                                <input type="number" id="batchElectrolyzerStep" value="25" step="5">
+                                <span class="opt-levels" id="batchElectrolyzerLevels">—</span>
+                            </div>
+                        </div>
+                        <p class="hint" id="batchSearchSpace">搜索空间：—</p>
+                        <p class="hint">
+                            批量计算只产生一份方案清单并逐组计算，<b>不会修改「电量计算」页的当前方案</b>；
+                            需要把某一组作为当前方案时，在右侧点击「设为当前方案」。
+                            运行参数沿用「电量计算」页设置。
+                        </p>
+                    </div>
+
+                    <div class="param-actions">
+                        <button class="btn btn-primary btn-lg" id="btnRunBatch">
+                            <span class="btn-icon">▶</span> 开始批量计算
+                        </button>
+                        <button class="btn btn-secondary" id="btnCancelBatch" style="display:none">
+                            <span class="btn-icon">⏹</span> 取消计算
+                        </button>
+                    </div>
+                </aside>
+
+                <!-- 右侧：方案清单比较表 -->
+                <div class="result-panel">
+                    <div class="progress-bar-container" id="batchProgressContainer" style="display:none">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="batchProgressFill" style="width:0%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="batchProgressText">准备中...</span>
+                            <span id="batchProgressPercent">0%</span>
+                        </div>
+                    </div>
+
+                    <div class="table-controls">
+                        <button class="btn btn-sm btn-outline" id="btnExportBatchSchemes" disabled>📥 导出方案清单Excel</button>
+                        <span class="hint" id="batchSummaryText">尚未运行</span>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="data-table" id="batchTable">
+                            <thead>
+                                <tr>
+                                    <th>#</th><th>方案编号</th><th>风电<br>(MW)</th><th>光伏<br>(MW)</th>
+                                    <th>储能<br>(MW/h)</th><th>储能容量<br>(MWh)</th><th>电解槽<br>(MW)</th>
+                                    <th>年制氢量<br>(万吨)</th><th>弃电率</th><th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="10" class="batch-empty">设置扫描范围后点击「开始批量计算」</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
     </main>
 
     <!-- 底部日志区 -->
@@ -753,6 +867,7 @@
 
     <!-- 应用模块 -->
     <script src="js/utils.js"></script>
+    <script src="js/parameter-manager.js"></script>
     <script src="js/excel-io.js"></script>
     <script src="js/simulation-engine.js"></script>
     <script src="js/data-summary.js"></script>

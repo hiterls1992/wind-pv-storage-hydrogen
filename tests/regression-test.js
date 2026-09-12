@@ -64,6 +64,7 @@ global.XLSX = XLSX;
 
 const MODULES = [
     'js/utils.js',
+    'js/parameter-manager.js',
     'js/simulation-engine.js',
     'js/data-summary.js',
     'js/estimate.js',
@@ -82,11 +83,12 @@ const DataSummary = global.DataSummary;
 const Estimate = global.Estimate;
 const FinanceEngine = global.FinanceEngine;
 const runSingleSimulation = global.runSingleSimulation;
+const ParameterManager = global.ParameterManager;
 
-out('多能互补风光储氢分析软件 V2.1 —— 回归测试报告');
+out('多能互补风光储氢分析软件 V2.2 —— 回归测试报告');
 out('生成时间：' + new Date().toISOString());
 out('模块加载：' + MODULES.join(' / '));
-assertTrue('模块加载完整性', !!(OptimizationEngine && DataSummary && Estimate && FinanceEngine && runSingleSimulation));
+assertTrue('模块加载完整性', !!(OptimizationEngine && DataSummary && Estimate && FinanceEngine && runSingleSimulation && ParameterManager));
 
 // ---------------------------------------------------------------------------
 // 1. 输入数据与参数（与前端 index.html / app.js 默认值完全一致）
@@ -139,7 +141,38 @@ const FINANCE_PARAMS = {
 
 const LCOH_DISCOUNT = 5.0;
 
+/**
+ * V2.2 运行参数（camelCase 规范字段名）。
+ * 数值与 SIM_PARAMS_BASE 完全等价 —— 二者是同一组物理参数的两种字段命名，
+ * 用于验证「字段名翻译层」不会改变任何计算结果。
+ */
+const SIM_CONFIG_BASE = {
+    electrolyzerMinRatio: 0.3,
+    maxExportHourly: 0.0,
+    maxExportTotal: 0.0,
+    maxImportRatio: 0.15,
+    chargeEfficiency: 0.92,
+    dischargeEfficiency: 0.92,
+    hydrogenConsumption: 55,
+};
+
+/** V2.2 规范上下文：容量不在此处出现，运行参数用 simulationConfig */
 function makeContext(extra) {
+    return Object.assign({
+        pvData: pvData,
+        windData: windData,
+        simulationConfig: SIM_CONFIG_BASE,
+        prices: PRICES,
+        financeParams: FINANCE_PARAMS,
+        lcohDiscountRate: LCOH_DISCOUNT,
+        cache: new Map(),
+        stats: { evaluated: 0, cacheHits: 0 },
+        config: OptimizationEngine.normalizeConfig({ lcoh: { discountRate: LCOH_DISCOUNT } }),
+    }, extra || {});
+}
+
+/** 兼容性上下文：沿用 V2.1 的 simParams 旧字段名（验证兼容层） */
+function makeLegacyContext(extra) {
     return Object.assign({
         pvData: pvData,
         windData: windData,
@@ -153,7 +186,11 @@ function makeContext(extra) {
     }, extra || {});
 }
 
-/** 现有 V1.0 计算链路（完全按 app.js 的调用顺序执行） */
+/**
+ * V1.0 / V2.1 旧调用链路（旧签名，容量一部分藏在 params 里、一部分是裸数字）。
+ * V2.2 保留它作为「数值基准」，用于验证重构零偏差。
+ * TODO V2.3 REMOVE LEGACY
+ */
 function runLegacyChain(scheme) {
     const params = Object.assign({}, SIM_PARAMS_BASE, {
         PV_CAPACITY: scheme.pvCapacity,
@@ -167,10 +204,155 @@ function runLegacyChain(scheme) {
     return { sim: sim, summaryRow: summaryRow, estimateRow: estimateRow, fin: fin };
 }
 
+/** V2.2 新调用链路（容量走 scheme、运行规则走 simulationConfig） */
+function runNewChain(scheme) {
+    const sim = runSingleSimulation(pvData, windData, scheme, SIM_CONFIG_BASE);
+    const summaryRow = DataSummary.generateSummary([sim], scheme)[0];
+    const estimateRow = Estimate.batchEstimate([summaryRow], PRICES)[0];
+    const fin = FinanceEngine.calculateAll(FINANCE_PARAMS, summaryRow, estimateRow);
+    return { sim: sim, summaryRow: summaryRow, estimateRow: estimateRow, fin: fin };
+}
+
+// ---------------------------------------------------------------------------
+// 0.5 V2.2 参数体系专项测试（任务书 §11 / §13 / §20 / §23 / §25 / §49）
+// ---------------------------------------------------------------------------
+section('0.5 V2.2 参数体系（单一数据源 / 派生量 / 标识 / 兼容层）');
+
+(function () {
+    // ---- 0.5.1 新旧签名 A/B：结果必须逐字节一致 ----
+    const abSchemes = [
+        { windCapacity: 100, pvCapacity: 100, storagePower: 50, storageDuration: 2, electrolyzerCapacity: 50 },
+        { windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 },
+        { windCapacity: 0, pvCapacity: 200, storagePower: 50, storageDuration: 2, electrolyzerCapacity: 50 },
+        { windCapacity: 300, pvCapacity: 500, storagePower: 200, storageDuration: 4, electrolyzerCapacity: 25 },
+        { windCapacity: 100, pvCapacity: 100, storagePower: 0, storageDuration: 0, electrolyzerCapacity: 0 },
+    ];
+    let maxDiff = 0;
+    let mismatch = 0;
+    for (const sc of abSchemes) {
+        const a = runLegacyChain(sc).sim;
+        const b = runNewChain(sc).sim;
+        if (a.results.length !== b.results.length) { mismatch++; continue; }
+        for (let i = 0; i < a.results.length; i++) {
+            const d = Math.abs(a.results[i] - b.results[i]);
+            if (d > maxDiff) maxDiff = d;
+            if (d !== 0) mismatch++;
+        }
+    }
+    assertTrue('旧签名与新签名逐元素完全一致（5 个方案 × ' + (abSchemes.length * 8760 * 11) + ' 个数值）',
+        maxDiff === 0, '最大差异 = ' + maxDiff + '，不一致元素 = ' + mismatch);
+
+    // ---- 0.5.2 字段名兼容层：simParams 旧名与 simulationConfig 新名结果一致 ----
+    const scRef = abSchemes[1];
+    const ctxLegacy = makeLegacyContext();
+    const ctxNew = makeContext();
+    const evLegacy = OptimizationEngine.evaluateScheme(scRef, ctxLegacy);
+    const evNew = OptimizationEngine.evaluateScheme(scRef, ctxNew);
+    assertTrue('simParams（旧字段名）与 simulationConfig（新字段名）评价结果完全一致',
+        Math.abs(evLegacy.technical.annualHydrogenKg - evNew.technical.annualHydrogenKg) === 0 &&
+        Math.abs(evLegacy.economic.LCOH - evNew.economic.LCOH) === 0,
+        '年制氢量 ' + evNew.technical.annualHydrogenKg.toFixed(2) + ' kg，LCOH ' + evNew.economic.LCOH.toFixed(4));
+
+    // ---- 0.5.3 方案标识 §49 ----
+    const key = ParameterManager.schemeKey({ windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 });
+    assertTrue('schemeKey 格式为 W…|PV…|B…|H…|EL…（§49）', key === 'W200|PV360|B100|H2|EL160', key);
+    assertTrue('优化引擎与 ParameterManager 的方案标识一致',
+        OptimizationEngine.schemeKey({ windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 }) === key);
+
+    // ---- 0.5.4 储能容量是派生量且只读（§25） ----
+    const norm = ParameterManager.normalizeScheme({ windCapacity: 100, pvCapacity: 100, storagePower: 75, storageDuration: 3, electrolyzerCapacity: 50 });
+    assertTrue('储能容量 = 储能功率 × 储能时长', norm.storageEnergy === 225, '75MW × 3h = ' + norm.storageEnergy + ' MWh');
+    const norm2 = ParameterManager.normalizeScheme({ windCapacity: 100, pvCapacity: 100, storagePower: 75, storageDuration: 3, electrolyzerCapacity: 50, storageEnergy: 99999 });
+    assertTrue('外部传入的 storageEnergy 被忽略（派生量不可被覆盖）', norm2.storageEnergy === 225, String(norm2.storageEnergy));
+
+    // ---- 0.5.5 单一数据源：getCurrentScheme 返回副本，外部修改不污染真值 ----
+    ParameterManager.setCurrentScheme({ windCapacity: 111, pvCapacity: 222, storagePower: 33, storageDuration: 1, electrolyzerCapacity: 44 });
+    const got = ParameterManager.getCurrentScheme();
+    got.windCapacity = 99999;
+    assertTrue('getCurrentScheme 返回副本，外部修改不影响唯一真值',
+        ParameterManager.getCurrentScheme().windCapacity === 111, String(ParameterManager.getCurrentScheme().windCapacity));
+
+    // ---- 0.5.6 baseline 唯一来源：基准就是 currentScheme ----
+    ParameterManager.setCurrentScheme({ windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 });
+    const base = ParameterManager.getCurrentScheme();
+    assertTrue('基准方案 === 当前方案（同一真值）',
+        base.windCapacity === 200 && base.pvCapacity === 360 && base.storageDuration === 2,
+        ParameterManager.schemeKey(base));
+
+    // ---- 0.5.7 方案参数校验（§44） ----
+    assertTrue('validateScheme 拒绝负值', ParameterManager.validateScheme({ windCapacity: -1, pvCapacity: 1, storagePower: 1, storageDuration: 1, electrolyzerCapacity: 1 }).ok === false);
+    assertTrue('validateScheme 接受零值（允许不配置）', ParameterManager.validateScheme({ windCapacity: 0, pvCapacity: 0, storagePower: 0, storageDuration: 0, electrolyzerCapacity: 0 }).ok === true);
+
+    // ---- 0.5.8 优化范围校验 + 基准是否在范围内（§27 / §28 / §45） ----
+    const optCfg = { variables: {
+        windCapacity: { min: 50, max: 300, step: 25 },
+        pvCapacity: { min: 50, max: 500, step: 25 },
+        storagePower: { min: 0, max: 200, step: 25 },
+        storageDuration: { min: 0, max: 4, step: 1 },
+        electrolyzerCapacity: { min: 25, max: 200, step: 25 },
+    } };
+    const inR = ParameterManager.checkBaselineInRange(base, optCfg);
+    assertTrue('基准 200/360/100/2/160 全部落在默认搜索范围内', inR.inRange === true,
+        inR.items.map(i => i.inRange ? '✓' : '✗').join(''));
+
+    const outBase = { windCapacity: 400, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 };
+    const outR = ParameterManager.checkBaselineInRange(outBase, optCfg);
+    assertTrue('基准风电 400MW 超出范围 50~300 被正确识别', outR.inRange === false,
+        outR.items.filter(i => !i.inRange).map(i => i.label).join('、'));
+
+    const expanded = ParameterManager.expandRangeToIncludeBaseline(outBase, optCfg);
+    assertTrue('「将优化范围包含基准方案」把风电下界扩到含 400 且不改步长',
+        expanded.variables.windCapacity.max === 400 && expanded.variables.windCapacity.step === 25,
+        'max=' + expanded.variables.windCapacity.max + ', step=' + expanded.variables.windCapacity.step);
+    assertTrue('expandRangeToIncludeBaseline 不修改原配置（纯函数）',
+        optCfg.variables.windCapacity.max === 300, '原 max=' + optCfg.variables.windCapacity.max);
+
+    assertTrue('validateOptimizationConfig 拒绝 min > max',
+        ParameterManager.validateOptimizationConfig({ variables: { windCapacity: { min: 300, max: 100, step: 25 } } }).ok === false);
+    assertTrue('validateOptimizationConfig 拒绝 step ≤ 0',
+        ParameterManager.validateOptimizationConfig({ variables: { windCapacity: { min: 0, max: 100, step: 0 } } }).ok === false);
+
+    // ---- 0.5.9 结果自带完整方案（§48） ----
+    const r0 = runNewChain(base);
+    assertTrue('仿真结果自带完整 scheme（含 storageEnergy）',
+        !!r0.sim.scheme && r0.sim.scheme.storageEnergy === 200 &&
+        r0.sim.scheme.windCapacity === 200 && r0.sim.scheme.pvCapacity === 360,
+        ParameterManager.schemeKey(r0.sim.scheme));
+    assertTrue('仿真结果自带 simulationConfig（可审计运行规则）',
+        !!r0.sim.simulationConfig && r0.sim.simulationConfig.hydrogenConsumption === 55);
+
+    // ---- 0.5.10 批量方案生成不污染当前方案（§40） ----
+    const before = ParameterManager.schemeKey(ParameterManager.getCurrentScheme());
+    const batch = ParameterManager.createBatchSchemes({
+        windCapacity: { min: 100, max: 200, step: 100 },
+        pvCapacity: { min: 200, max: 200, step: 0 },
+        storagePower: { min: 50, max: 50, step: 0 },
+        storageDuration: { min: 2, max: 2, step: 0 },
+        electrolyzerCapacity: { min: 100, max: 100, step: 0 },
+    });
+    assertTrue('批量方案生成数量正确（2×1×1×1×1 = 2）', batch.length === 2, String(batch.length));
+    assertTrue('批量方案生成不修改当前方案', ParameterManager.schemeKey(ParameterManager.getCurrentScheme()) === before, before);
+    assertTrue('批量方案每一项均带派生 storageEnergy', batch.every(s => s.storageEnergy === s.storagePower * s.storageDuration));
+
+    // ---- 0.5.11 档位数计算与 Utils.getValues 一致 ----
+    let levelMismatch = 0;
+    const levelCases = [[50, 300, 25], [50, 500, 25], [0, 200, 25], [0, 4, 1], [25, 200, 25], [100, 100, 0], [0, 0, 0]];
+    for (const [mn, mx, st] of levelCases) {
+        if (ParameterManager.countLevels(mn, mx, st) !== Utils.getValues(mn, mx, st).length) levelMismatch++;
+        if (ParameterManager.buildLevels(mn, mx, st).join(',') !== Utils.getValues(mn, mx, st).join(',')) levelMismatch++;
+    }
+    assertTrue('countLevels / buildLevels 与 Utils.getValues 完全一致', levelMismatch === 0,
+        levelCases.map(c => c.join('/')).join('  '));
+
+    // ---- 0.5.12 恢复默认，避免影响后续章节 ----
+    ParameterManager.setCurrentScheme({ windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 });
+})();
+
+
 // ---------------------------------------------------------------------------
 // 2. 测试方案 1：简单方案 —— V1.0 链路 vs V2.1 evaluateScheme
 // ---------------------------------------------------------------------------
-section('2. 测试方案1（简单方案）：V1.0 链路 与 V2.1 evaluateScheme 数值一致性');
+section('2. 测试方案1（简单方案）：V1.0 链路 与 V2.2 evaluateScheme 数值一致性');
 
 const SCHEME_1 = {
     windCapacity: 100, pvCapacity: 100,
@@ -877,10 +1059,13 @@ function intFrom(id, fallback) {
             curtailmentRate: numFrom('optWeightCurtail', 25) / 100,
         },
         lcoh: { discountRate: numFrom('optLcohDiscount', 5.0) },
+        // V2.2：基准方案直接取自「电量计算」页的当前方案（优化页已无独立基准输入框，§16 / §18）
         baseline: {
-            windCapacity: numFrom('baseWind', 200), pvCapacity: numFrom('basePv', 360),
-            storagePower: numFrom('baseStoragePower', 100), storageDuration: numFrom('baseStorageDuration', 2),
-            electrolyzerCapacity: numFrom('baseElectrolyzer', 160),
+            windCapacity: numFrom('currentWindCapacity', 200),
+            pvCapacity: numFrom('currentPvCapacity', 360),
+            storagePower: numFrom('currentStoragePower', 100),
+            storageDuration: numFrom('currentStorageDuration', 2),
+            electrolyzerCapacity: numFrom('currentElectrolyzerCapacity', 160),
         },
     });
 
@@ -894,17 +1079,23 @@ function intFrom(id, fallback) {
         (config.recommendationWeights.lcoh * 100) + '% / 弃电率 ' + (config.recommendationWeights.curtailmentRate * 100) + '%');
     out('  LCOH 折现率：' + config.lcoh.discountRate + '%');
 
-    // app.js getSimulationParams() 的等价实现（含同一套 fallback）
-    const simParams = {
-        PV_CAPACITY: numFrom('pvCapacity', 360),
-        WIND_CAPACITY: numFrom('windCapacity', 200),
-        ELECTROLYZER_MIN_RATIO: numFrom('electrolyzerMinRatio', 0.3),
-        MAX_EXPORT_RATIO_HOURLY: numFrom('maxExportHourly', 0.0),
-        MAX_EXPORT_RATIO_TOTAL: numFrom('maxExportTotal', 0.0),
-        MAX_IMPORT_RATIO: numFrom('maxImportRatio', 0.15),
-        STORAGE_CHARGE_EFFICIENCY: numFrom('chargeEfficiency', 0.92),
-        STORAGE_DISCHARGE_EFFICIENCY: numFrom('dischargeEfficiency', 0.92),
-        HYDROGEN_ENERGY_CONSUMPTION: numFrom('hydrogenConsumption', 55),
+    // app.js getSimulationConfig() 的等价实现（运行参数，**不含任何容量**，§5 / §12）
+    const simulationConfig = {
+        electrolyzerMinRatio: numFrom('electrolyzerMinRatio', 0.3),
+        maxExportHourly: numFrom('maxExportHourly', 0.0),
+        maxExportTotal: numFrom('maxExportTotal', 0.0),
+        maxImportRatio: numFrom('maxImportRatio', 0.15),
+        chargeEfficiency: numFrom('chargeEfficiency', 0.92),
+        dischargeEfficiency: numFrom('dischargeEfficiency', 0.92),
+        hydrogenConsumption: numFrom('hydrogenConsumption', 55),
+    };
+    // 「当前方案」的等价实现（容量参数，唯一来源）
+    const currentScheme = {
+        windCapacity: numFrom('currentWindCapacity', 200),
+        pvCapacity: numFrom('currentPvCapacity', 360),
+        storagePower: numFrom('currentStoragePower', 100),
+        storageDuration: numFrom('currentStorageDuration', 2),
+        electrolyzerCapacity: numFrom('currentElectrolyzerCapacity', 160),
     };
     // app.js getEstimatePrices() 的等价实现
     const prices = {
@@ -933,14 +1124,16 @@ function intFrom(id, fallback) {
         h2_price: numFrom('h2Price', 30.0), output_vat_rate: numFrom('outputVatRate', 13.0),
         income_tax_rate: numFrom('incomeTaxRate', 25.0), surtax_rate: numFrom('surtaxRate', 12.0),
     };
-    out('  出厂默认仿真参数：光伏 ' + simParams.PV_CAPACITY + 'MW / 风电 ' + simParams.WIND_CAPACITY +
-        'MW / 电解槽最低比 ' + simParams.ELECTROLYZER_MIN_RATIO + ' / 制氢电耗 ' + simParams.HYDROGEN_ENERGY_CONSUMPTION + ' kWh/kg');
+    out('  出厂默认当前方案：风电 ' + currentScheme.windCapacity + 'MW / 光伏 ' + currentScheme.pvCapacity +
+        'MW / 储能 ' + currentScheme.storagePower + 'MW×' + currentScheme.storageDuration + 'h / 电解槽 ' + currentScheme.electrolyzerCapacity + 'MW');
+    out('  出厂默认运行参数：电解槽最低比 ' + simulationConfig.electrolyzerMinRatio +
+        ' / 制氢电耗 ' + simulationConfig.hydrogenConsumption + ' kWh/kg');
     out('  出厂默认财务参数：计算期 ' + financeParams.calc_period + ' 年 / 氢气售价 ' + financeParams.h2_price +
         ' 元/kg / 税金附加 ' + financeParams.surtax_rate + '%');
 
     const appShapedCtx = {
         pvData: pvData, windData: windData,
-        simParams: simParams, prices: prices, financeParams: financeParams,
+        simulationConfig: simulationConfig, prices: prices, financeParams: financeParams,
         lcohDiscountRate: config.lcoh.discountRate,
     };
 
@@ -966,7 +1159,7 @@ function intFrom(id, fallback) {
     try {
         const aliasCtx = {
             pv: pvData, wind: windData,
-            simParams: simParams, prices: prices, financeParams: financeParams,
+            simulationConfig: simulationConfig, prices: prices, financeParams: financeParams,
             lcohDiscountRate: config.lcoh.discountRate,
         };
         const ev = OptimizationEngine.evaluateScheme({
@@ -980,10 +1173,60 @@ function intFrom(id, fallback) {
     // 11.4 缺少风光数据时必须给出可读错误
     let missErr = null;
     try {
-        OptimizationEngine.createSession({ config: config, context: { simParams: simParams, prices: prices, financeParams: financeParams } });
+        OptimizationEngine.createSession({ config: config, context: { simulationConfig: simulationConfig, prices: prices, financeParams: financeParams } });
     } catch (e) { missErr = e; }
     assertTrue('11.4 缺少风光数据时给出可读错误', !!missErr && /8760|数据/.test(missErr.message),
         missErr ? missErr.message : '未抛出');
+
+    // 11.5 运行参数旧字段名（UPPER_SNAKE）经兼容层后结果一致
+    let legacyOk = false, legacyErr = null;
+    try {
+        const legacyCtx = {
+            pvData: pvData, windData: windData,
+            simParams: SIM_PARAMS_BASE, prices: prices, financeParams: financeParams,
+            lcohDiscountRate: config.lcoh.discountRate,
+        };
+        const evN = OptimizationEngine.evaluateScheme(currentScheme, {
+            pvData: pvData, windData: windData,
+            simulationConfig: simulationConfig, prices: prices, financeParams: financeParams,
+            lcohDiscountRate: config.lcoh.discountRate,
+        });
+        const evL = OptimizationEngine.evaluateScheme(currentScheme, legacyCtx);
+        legacyOk = evN.technical.annualHydrogenKg === evL.technical.annualHydrogenKg;
+    } catch (e) { legacyErr = e; }
+    assertTrue('11.5 运行参数旧字段名可经兼容层正确翻译（结果零差异）', legacyOk,
+        legacyErr ? legacyErr.message : '新旧字段名结果一致');
+
+    // 11.6 HTML 出厂默认 与 ParameterManager 内置默认 必须一致（避免两份默认值漂移）
+    let defOk = true; const defDetail = [];
+    for (const k of ParameterManager.SCHEME_KEYS) {
+        const htmlDefault = currentScheme[k];
+        const pmDefault = ParameterManager.DEFAULT_SCHEME[k];
+        if (htmlDefault !== pmDefault) {
+            defOk = false;
+            defDetail.push(k + ': HTML=' + htmlDefault + ' ≠ ParameterManager=' + pmDefault);
+        }
+    }
+    assertTrue('11.6 HTML「当前方案」默认值与 ParameterManager 内置默认值一致', defOk,
+        defDetail.join(' | ') || ('风电 ' + currentScheme.windCapacity + ' / 光伏 ' + currentScheme.pvCapacity +
+            ' / 储能 ' + currentScheme.storagePower + '×' + currentScheme.storageDuration +
+            ' / 电解槽 ' + currentScheme.electrolyzerCapacity));
+
+    // 11.7 旧容量 DOM id 必须已从 HTML 中彻底移除（§7 / §17 §50）
+    const removedIds = [
+        'pvCapacity', 'windCapacity',
+        'storagePowerMin', 'storagePowerMax', 'storagePowerStep',
+        'storageDurationMin', 'storageDurationMax', 'storageDurationStep',
+        'electrolyzerMin', 'electrolyzerMax', 'electrolyzerStep',
+        'baseWind', 'basePv', 'baseStoragePower', 'baseStorageDuration', 'baseElectrolyzer',
+    ];
+    const stillThere = removedIds.filter(id => html.indexOf('id="' + id + '"') >= 0);
+    assertTrue('11.7 「电量计算」主参数区与基准方案的旧输入框已全部移除', stillThere.length === 0,
+        stillThere.length ? ('仍存在：' + stillThere.join(', ')) : (removedIds.length + ' 个旧 id 均已移除'));
+
+    // 11.8 新页签「批量计算」已就位（§40）
+    assertTrue('11.8 「批量计算」页签与面板已就位',
+        html.indexOf('data-tab="batch"') >= 0 && html.indexOf('id="tab-batch"') >= 0);
 })();
 
 // ---------------------------------------------------------------------------

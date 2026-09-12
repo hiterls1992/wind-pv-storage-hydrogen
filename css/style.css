@@ -758,7 +758,8 @@ body {
 .opt-var-head,
 .opt-var-row {
     display: grid;
-    grid-template-columns: 92px 1fr 1fr 1fr 34px;
+    /* V2.2：变量 | 当前值 | 最小 | 最大 | 步长 | 档位 */
+    grid-template-columns: 76px 50px 1fr 1fr 1fr 30px;
     align-items: center;
     gap: 5px;
 }
@@ -1088,9 +1089,172 @@ body {
 
 @media (max-width: 1200px) {
     .opt-param-panel { width: 360px; min-width: 360px; }
-    .opt-var-head, .opt-var-row { grid-template-columns: 80px 1fr 1fr 1fr 30px; }
+    .opt-var-head, .opt-var-row { grid-template-columns: 68px 44px 1fr 1fr 1fr 28px; }
 }
 
 @media (max-width: 900px) {
     .opt-param-panel { width: 100%; min-width: 100%; }
+}
+
+/* ============================================================================
+ * V2.2 参数体系重构 —— 新增样式
+ * ============================================================================ */
+
+/* ---- 当前方案 / 基准方案 状态栏（§9 / §39）----
+   电量计算页与优化页显示的是同一份 AppState.currentScheme，禁止各自维护 */
+.scheme-status {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent-cyan);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    margin-bottom: 10px;
+}
+
+.scheme-status-title {
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.scheme-status-text {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    line-height: 1.6;
+    word-break: break-all;
+}
+
+.scheme-status-key {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.scheme-status-key span { color: var(--accent-cyan); }
+
+/* ---- 只读派生字段（储能容量 = 储能功率 × 储能时长）---- */
+input.input-readonly,
+.input-readonly {
+    background: var(--bg-tertiary) !important;
+    color: var(--text-muted) !important;
+    cursor: not-allowed;
+    font-family: var(--font-mono);
+    border-style: dashed !important;
+}
+
+/* ---- 优化变量表「当前值」列 ---- */
+.opt-var-current {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--accent-cyan);
+    text-align: center;
+    background: var(--bg-tertiary);
+    border: 1px dashed var(--border-color);
+    border-radius: var(--radius);
+    padding: 2px 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.opt-var-current.is-out-range {
+    color: var(--accent-yellow);
+    border-color: var(--accent-yellow);
+}
+
+/* ---- 「当前基准不在优化范围内」提示（§27：只提示，不自动改值）---- */
+.opt-range-warn {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--accent-yellow);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    background: rgba(255, 200, 0, 0.06);
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--text-secondary);
+}
+
+.opt-range-warn .opt-range-warn-title {
+    color: var(--accent-yellow);
+    font-weight: 600;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.opt-range-warn ul {
+    margin: 0 0 6px 0;
+    padding-left: 16px;
+    font-family: var(--font-mono);
+}
+
+.opt-range-warn li.is-out { color: var(--accent-yellow); }
+
+/* ---- 批量计算扫描表（5 列，无「当前值」列）---- */
+.batch-var-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.batch-var-head,
+.batch-var-row {
+    display: grid;
+    grid-template-columns: 92px 1fr 1fr 1fr 34px;
+    align-items: center;
+    gap: 5px;
+}
+
+.batch-var-head span {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.batch-var-head span:first-child { text-align: left; }
+
+.batch-var-row label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.batch-var-row input {
+    min-width: 0;
+    width: 100%;
+    padding: 3px 5px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    outline: none;
+}
+
+.batch-var-row input:focus { border-color: var(--accent-cyan); }
+
+.batch-empty {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 22px 10px !important;
+}
+
+#batchTable td.batch-num {
+    font-family: var(--font-mono);
+    text-align: right;
+}
+
+#batchTable tbody tr.is-current td {
+    background: rgba(0, 212, 255, 0.12);
+}
+
+@media (max-width: 1200px) {
+    .batch-var-head, .batch-var-row { grid-template-columns: 80px 1fr 1fr 1fr 30px; }
 }

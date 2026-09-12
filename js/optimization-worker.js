@@ -32,6 +32,7 @@ if (typeof importScripts !== 'function') {
     // 复用现有全部计算模块（顺序不可调整：optimization-engine 依赖前者）
     importScripts(
         'utils.js',
+        'parameter-manager.js',
         'simulation-engine.js',
         'data-summary.js',
         'estimate.js',
@@ -66,7 +67,9 @@ if (typeof importScripts !== 'function') {
             var ctx = {
                 pvData: toFloat64(raw.pvData !== undefined ? raw.pvData : raw.pv, '光伏 8760'),
                 windData: toFloat64(raw.windData !== undefined ? raw.windData : raw.wind, '风电 8760'),
-                simParams: raw.simParams,
+                // V2.2：运行参数统一字段名 simulationConfig（容量不再经由上下文传递，一律走 scheme）
+                // TODO V2.3 REMOVE LEGACY：兼容 V2.1 的 simParams 字段名
+                simulationConfig: raw.simulationConfig !== undefined ? raw.simulationConfig : raw.simParams,
                 prices: raw.prices,
                 financeParams: raw.financeParams,
                 lcohDiscountRate: raw.lcohDiscountRate,

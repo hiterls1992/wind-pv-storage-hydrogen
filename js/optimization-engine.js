@@ -297,8 +297,19 @@
     // 四、统一单方案评价函数 evaluateScheme()
     // ======================================================================
 
-    /** 方案唯一键（缓存 key：wind|pv|storagePower|storageDuration|electrolyzer） */
+    /**
+     * 方案唯一键（任务书 §49）。
+     *
+     * V2.2 起**统一委托 ParameterManager.schemeKey()**，全项目只允许存在一种方案标识格式：
+     *     W200|PV360|B100|H2|EL160
+     * 统一用于：缓存 / 结果索引 / 方案选择 / Pareto方案 / Baseline / Excel导出。
+     */
     function schemeKey(scheme) {
+        const g = rt();
+        if (g.ParameterManager && typeof g.ParameterManager.schemeKey === 'function') {
+            return g.ParameterManager.schemeKey(scheme);
+        }
+        // 兜底（正常不会走到：collaborators() 已把 ParameterManager 列为必需模块）
         return [
             scheme.windCapacity,
             scheme.pvCapacity,
@@ -322,14 +333,47 @@
     }
 
     /**
+     * 运行参数归一化。
+     *
+     * TODO V2.3 REMOVE LEGACY
+     *   兼容 V2.1 的 UPPER_SNAKE 字段名（ELECTROLYZER_MIN_RATIO 等）。
+     *   兼容层只做「字段名翻译」，不改变任何取值；
+     *   业务逻辑必须使用 V2.2 规范的 camelCase 字段（任务书 §37）。
+     */
+    function toSimulationConfig(raw) {
+        if (!raw) return null;
+        // 已是 V2.2 规范字段 → 原样返回
+        if (raw.electrolyzerMinRatio !== undefined || raw.hydrogenConsumption !== undefined ||
+            raw.chargeEfficiency !== undefined || raw.maxImportRatio !== undefined) {
+            return raw;
+        }
+        // V2.1 旧字段名 → 翻译
+        return {
+            electrolyzerMinRatio: raw.ELECTROLYZER_MIN_RATIO,
+            maxExportHourly: raw.MAX_EXPORT_RATIO_HOURLY,
+            maxExportTotal: raw.MAX_EXPORT_RATIO_TOTAL,
+            maxImportRatio: raw.MAX_IMPORT_RATIO,
+            chargeEfficiency: raw.STORAGE_CHARGE_EFFICIENCY,
+            dischargeEfficiency: raw.STORAGE_DISCHARGE_EFFICIENCY,
+            hydrogenConsumption: raw.HYDROGEN_ENERGY_CONSUMPTION,
+        };
+    }
+
+    /**
      * 上下文键名兼容。
-     * 正式约定：pvData / windData；
-     * 同时兼容 pv / wind，避免调用方字段命名不一致时静默失败。
+     * 正式约定：pvData / windData / simulationConfig；
+     * 同时兼容 pv / wind / simParams，避免调用方字段命名不一致时静默失败。
      */
     function normalizeContext(ctx) {
         if (!ctx) return ctx;
         if (!ctx.pvData && ctx.pv) ctx.pvData = ctx.pv;
         if (!ctx.windData && ctx.wind) ctx.windData = ctx.wind;
+        // TODO V2.3 REMOVE LEGACY：旧字段 simParams → 新字段 simulationConfig
+        if (!ctx.simulationConfig && ctx.simParams) {
+            ctx.simulationConfig = toSimulationConfig(ctx.simParams);
+        } else if (ctx.simulationConfig) {
+            ctx.simulationConfig = toSimulationConfig(ctx.simulationConfig);
+        }
         return ctx;
     }
 
@@ -338,6 +382,7 @@
         const g = rt();
         const missing = [];
         if (typeof g.runSingleSimulation !== 'function') missing.push('simulation-engine.js (runSingleSimulation)');
+        if (!g.ParameterManager || typeof g.ParameterManager.schemeKey !== 'function') missing.push('parameter-manager.js (ParameterManager)');
         if (!g.DataSummary || typeof g.DataSummary.generateSummary !== 'function') missing.push('data-summary.js (DataSummary)');
         if (!g.Estimate || typeof g.Estimate.batchEstimate !== 'function') missing.push('estimate.js (Estimate)');
         if (!g.FinanceEngine || typeof g.FinanceEngine.calculateAll !== 'function') missing.push('finance-engine.js (FinanceEngine)');
@@ -393,15 +438,10 @@
         const pvData = context.pvData;
         const windData = context.windData;
 
-        // ---- 1. 8760 小时仿真（复用 V1.0 调度逻辑，此处不做任何改动） ----
-        const simParams = Object.assign({}, context.simParams, {
-            PV_CAPACITY: scheme.pvCapacity,
-            WIND_CAPACITY: scheme.windCapacity,
-        });
-
+        // ---- 1. 8760 小时仿真（唯一入口：容量走 scheme，运行规则走 simulationConfig） ----
+        // 任务书 §36：禁止再把容量 Object.assign 进运行参数对象（PV_CAPACITY/WIND_CAPACITY 注入已删除）
         const sim = co.runSingleSimulation(
-            pvData, windData, simParams,
-            scheme.storagePower, scheme.storageDuration, scheme.electrolyzerCapacity
+            pvData, windData, scheme, context.simulationConfig
         );
 
         // ---- 2. 年度技术指标（复用 data-summary.js） ----
@@ -1153,7 +1193,9 @@
                 context.onWarn('风光数据长度为 ' + n + ' 小时（标准应为 8760），结果仅供参考');
             }
         }
-        if (!context.simParams) throw new Error('缺少仿真系统参数');
+        if (!context.simulationConfig) {
+            throw new Error('缺少系统运行参数（simulationConfig），请检查参数传递链路');
+        }
         if (!context.prices) throw new Error('缺少概算设备单价参数');
         if (!context.financeParams) throw new Error('缺少财务评价参数');
     }

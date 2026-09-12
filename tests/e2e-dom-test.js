@@ -51,6 +51,7 @@ const SCRIPT_ORDER = [
     'js/vendor/jszip.min.js',
     'js/vendor/FileSaver.min.js',
     'js/utils.js',
+    'js/parameter-manager.js',
     'js/excel-io.js',
     'js/simulation-engine.js',
     'js/data-summary.js',
@@ -103,25 +104,107 @@ const SCRIPT_ORDER = [
 
     const logText = () => doc.getElementById('logContent').textContent || '';
 
-    const inited = await waitFor(() => /WEB-V2\.1 已就绪/.test(logText()), 20000);
+    const inited = await waitFor(() => /WEB-V2\.2 已就绪/.test(logText()), 20000);
     if (inited) {
-        ok('页面初始化完成并输出版本号 V2.1');
+        ok('页面初始化完成并输出版本号 V2.2');
     } else {
         bad('页面初始化未完成（readyState=' + doc.readyState + '）', pageErrors.join(' | ') || '未见异常，请检查脚本加载');
     }
 
     if (typeof window.OptimizationEngine !== 'undefined') ok('优化引擎已挂载到 window');
     else bad('优化引擎未挂载');
+    if (typeof window.ParameterManager !== 'undefined') ok('参数管理器已挂载到 window');
+    else bad('参数管理器未挂载');
 
     // 优化页初始化日志
     if (/【优化】方案优化模块已加载/.test(logText())) ok('优化模块初始化完成');
     else bad('优化模块未初始化', pageErrors.join(' | '));
 
-    // 基准方案自动从电量计算页读取
-    const basePv = doc.getElementById('basePv').value;
-    const baseWind = doc.getElementById('baseWind').value;
-    if (basePv === '360' && baseWind === '200') ok('基准方案自动读取电量计算页参数', '光伏 ' + basePv + 'MW / 风电 ' + baseWind + 'MW');
-    else bad('基准方案读取异常', '光伏=' + basePv + ' 风电=' + baseWind);
+    // -----------------------------------------------------------------------
+    section('1.5 V2.2 参数体系（当前方案 / 运行参数 / 派生量 / 基准）');
+
+    const curVal = id => doc.getElementById(id).value;
+    info('当前方案输入：风电=' + curVal('currentWindCapacity') + ' 光伏=' + curVal('currentPvCapacity') +
+         ' 储能=' + curVal('currentStoragePower') + 'MW×' + curVal('currentStorageDuration') + 'h' +
+         ' 电解槽=' + curVal('currentElectrolyzerCapacity'));
+    if (curVal('currentWindCapacity') === '200' && curVal('currentPvCapacity') === '360' &&
+        curVal('currentStoragePower') === '100' && curVal('currentStorageDuration') === '2' &&
+        curVal('currentElectrolyzerCapacity') === '160') {
+        ok('「当前方案」出厂默认值与设计一致', '200 / 360 / 100 / 2 / 160');
+    } else {
+        bad('「当前方案」默认值异常');
+    }
+
+    // 储能容量必须是只读派生量
+    const se = doc.getElementById('currentStorageEnergy');
+    if (se.readOnly === true && se.value === '200') ok('储能容量为只读派生字段', '100MW × 2h = ' + se.value + ' MWh');
+    else bad('储能容量不是只读派生字段', 'readOnly=' + se.readOnly + ', value=' + se.value);
+
+    // 当前方案状态栏
+    const statusText = doc.getElementById('currentSchemeStatusText').textContent || '';
+    if (/风电 200 MW/.test(statusText) && /200 MWh/.test(statusText)) ok('当前方案状态栏已渲染', statusText.replace(/\s+/g, ' ').trim());
+    else bad('当前方案状态栏未渲染', statusText.slice(0, 120));
+
+    // 改动容量输入 → 真值立即同步（§38）
+    doc.getElementById('currentWindCapacity').value = '250';
+    doc.getElementById('currentWindCapacity').dispatchEvent(new window.Event('input'));
+    const pm = window.ParameterManager;
+    if (pm.getCurrentScheme().windCapacity === 250) ok('容量输入改动即时写入唯一真值', '风电 200 → 250 MW');
+    else bad('容量输入改动未写入真值', String(pm.getCurrentScheme().windCapacity));
+
+    // 储能容量随功率/时长自动重算
+    doc.getElementById('currentStoragePower').value = '150';
+    doc.getElementById('currentStoragePower').dispatchEvent(new window.Event('input'));
+    if (doc.getElementById('currentStorageEnergy').value === '300') ok('储能容量随储能功率自动重算', '150MW × 2h = 300 MWh');
+    else bad('储能容量未自动重算', doc.getElementById('currentStorageEnergy').value);
+    if (pm.getCurrentScheme().storageEnergy === 300) ok('真值中的派生储能容量同步更新', '300 MWh');
+    else bad('真值中的储能容量未更新', String(pm.getCurrentScheme().storageEnergy));
+
+    // 改回默认，避免影响后续断言
+    doc.getElementById('currentWindCapacity').value = '200';
+    doc.getElementById('currentWindCapacity').dispatchEvent(new window.Event('input'));
+    doc.getElementById('currentStoragePower').value = '100';
+    doc.getElementById('currentStoragePower').dispatchEvent(new window.Event('input'));
+    if (pm.schemeKey(pm.getCurrentScheme()) === 'W200|PV360|B100|H2|EL160') {
+        ok('方案编号格式正确（§49）', pm.schemeKey(pm.getCurrentScheme()));
+    } else {
+        bad('方案编号格式异常', pm.schemeKey(pm.getCurrentScheme()));
+    }
+
+    // 优化页基准方案 = 当前方案（无独立输入框，§16 / §18）
+    const baseStatus = doc.getElementById('optBaselineStatusText').textContent || '';
+    if (/风电 200 MW/.test(baseStatus) && /光伏 360 MW/.test(baseStatus)) {
+        ok('优化页基准方案自动同步当前方案', baseStatus.replace(/\s+/g, ' ').trim());
+    } else {
+        bad('优化页基准方案未同步', baseStatus.slice(0, 120));
+    }
+    if (doc.getElementById('optBaselineKey').textContent === 'W200|PV360|B100|H2|EL160') {
+        ok('优化页显示方案编号', doc.getElementById('optBaselineKey').textContent);
+    } else {
+        bad('优化页方案编号异常', doc.getElementById('optBaselineKey').textContent);
+    }
+
+    // 「当前值」列只读显示，来自当前方案（§26）
+    const curCols = ['optCurrentWind', 'optCurrentPv', 'optCurrentStoragePower', 'optCurrentStorageDuration', 'optCurrentElectrolyzer']
+        .map(id => doc.getElementById(id).textContent);
+    if (curCols.join('/') === '200/360/100/2/160') ok('优化变量表「当前值」列正确', curCols.join(' / '));
+    else bad('「当前值」列异常', curCols.join('/'));
+
+    // 基准不在搜索范围时的提示（§27 / §28）
+    doc.getElementById('optWindMax').value = '150';
+    doc.getElementById('optWindMax').dispatchEvent(new window.Event('input'));
+    if (doc.getElementById('optRangeWarn').style.display !== 'none' &&
+        /不在优化搜索空间内/.test(doc.getElementById('optRangeWarn').textContent)) {
+        ok('基准超出搜索范围时给出提示（不自动改值）', '风电 200 > 上限 150');
+    } else {
+        bad('超出范围未给出提示', doc.getElementById('optRangeWarn').textContent.slice(0, 100));
+    }
+    if (doc.getElementById('currentWindCapacity').value === '200') ok('范围外提示不修改当前方案数值');
+    else bad('范围外提示竟修改了当前方案', doc.getElementById('currentWindCapacity').value);
+    doc.getElementById('optWindMax').value = '300';
+    doc.getElementById('optWindMax').dispatchEvent(new window.Event('input'));
+    if (doc.getElementById('optRangeWarn').style.display === 'none') ok('基准回到范围内后提示自动隐藏');
+    else bad('范围恢复后提示未隐藏');
 
     // 档位数 / 搜索空间实时预览（必须是 JS 计算出来的，而非 HTML 静态值）
     info('档位预览：风电=' + doc.getElementById('optWindLevels').textContent +
@@ -381,17 +464,21 @@ const SCRIPT_ORDER = [
         if (simOk) {
             ok('8760 小时复核完成（重新执行了一次完整仿真）',
                 rowsNow() + ' 行（复核前 ' + before + ' 行）');
-            const pv = doc.getElementById('pvCapacity').value;
-            const wind = doc.getElementById('windCapacity').value;
-            const sp = doc.getElementById('storagePowerMin').value;
-            const sd = doc.getElementById('storageDurationMin').value;
-            const ec = doc.getElementById('electrolyzerMin').value;
-            info('推荐方案已回写：光伏 ' + pv + 'MW / 风电 ' + wind + 'MW / 储能 ' + sp + 'MW×' + sd + 'h / 电解槽 ' + ec + 'MW');
-            const onePoint = doc.getElementById('storagePowerMin').value === doc.getElementById('storagePowerMax').value &&
-                             doc.getElementById('electrolyzerMin').value === doc.getElementById('electrolyzerMax').value &&
-                             doc.getElementById('storageDurationMin').value === doc.getElementById('storageDurationMax').value;
-            if (onePoint) ok('扫描范围已收敛为单点，确保复核的就是该方案本身');
-            else bad('扫描范围未收敛为单点');
+            // V2.2：推荐方案通过 setCurrentScheme → syncSchemeToUI 回写到「当前方案」
+            const wind = doc.getElementById('currentWindCapacity').value;
+            const pv = doc.getElementById('currentPvCapacity').value;
+            const sp = doc.getElementById('currentStoragePower').value;
+            const sd = doc.getElementById('currentStorageDuration').value;
+            const se = doc.getElementById('currentStorageEnergy').value;
+            const ec = doc.getElementById('currentElectrolyzerCapacity').value;
+            info('推荐方案已回写「当前方案」：风电 ' + wind + 'MW / 光伏 ' + pv + 'MW / 储能 ' +
+                 sp + 'MW×' + sd + 'h（' + se + 'MWh）/ 电解槽 ' + ec + 'MW');
+            if (Number(se) === Number(sp) * Number(sd)) ok('回写后储能容量仍等于功率×时长（派生量自洽）');
+            else bad('回写后储能容量与功率×时长不一致', se + ' vs ' + (Number(sp) * Number(sd)));
+            const pmKey = window.ParameterManager.schemeKey(window.ParameterManager.getCurrentScheme());
+            info('当前方案编号：' + pmKey);
+            if (/^W\d+\|PV\d+\|B\d+\|H[\d.]+\|EL\d+$/.test(pmKey)) ok('当前方案编号格式正确');
+            else bad('当前方案编号格式异常', pmKey);
             if (doc.getElementById('tab-simulation').classList.contains('active')) ok('自动切换到「电量计算」页');
             else bad('未切换到电量计算页');
             if (/8760 小时复核完成/.test(logText())) ok('复核完成后自动跳转「图表分析」并渲染图表');
@@ -401,6 +488,62 @@ const SCRIPT_ORDER = [
         }
     } else {
         bad('「查看8760小时运行结果」按钮不可用');
+    }
+
+    // -----------------------------------------------------------------------
+    section('8.5 批量计算页（V2.2 独立模块）');
+
+    // 扫描范围设为 2 个风电档位 × 单点其余变量，快速验证
+    const setV = (id, v) => {
+        const el = doc.getElementById(id);
+        el.value = String(v);
+        el.dispatchEvent(new window.Event('input'));
+    };
+    setV('batchWindMin', 150); setV('batchWindMax', 200); setV('batchWindStep', 50);
+    setV('batchPvMin', 360); setV('batchPvMax', 360); setV('batchPvStep', 25);
+    setV('batchStoragePowerMin', 100); setV('batchStoragePowerMax', 100); setV('batchStoragePowerStep', 25);
+    setV('batchStorageDurationMin', 2); setV('batchStorageDurationMax', 2); setV('batchStorageDurationStep', 1);
+    setV('batchElectrolyzerMin', 160); setV('batchElectrolyzerMax', 160); setV('batchElectrolyzerStep', 25);
+
+    const batchSpace = doc.getElementById('batchSearchSpace').textContent || '';
+    if (/2 个方案/.test(batchSpace)) ok('批量计算搜索空间预览正确（2 个方案）', batchSpace.trim());
+    else bad('批量计算搜索空间预览异常', batchSpace.trim());
+
+    const curBeforeBatch = window.ParameterManager.schemeKey(window.ParameterManager.getCurrentScheme());
+    doc.getElementById('btnRunBatch').click();
+    const batchDone = await waitFor(() => /【批量】批量计算完成/.test(logText()), 90000);
+    if (batchDone) {
+        const rows = doc.getElementById('batchTable').querySelectorAll('tbody tr').length;
+        ok('批量计算完成', rows + ' 行方案清单');
+        if (rows === 2) ok('方案清单行数与搜索空间一致（2 行）');
+        else bad('方案清单行数异常', String(rows));
+        const html = doc.getElementById('batchTable').innerHTML;
+        if (/W150\|PV360/.test(html) && /W200\|PV360/.test(html)) ok('方案清单含方案编号（§49）');
+        else bad('方案清单缺少方案编号');
+        // 关键：批量计算不得修改当前方案（§40）
+        if (window.ParameterManager.schemeKey(window.ParameterManager.getCurrentScheme()) === curBeforeBatch) {
+            ok('批量计算未修改当前方案', curBeforeBatch);
+        } else {
+            bad('批量计算修改了当前方案',
+                window.ParameterManager.schemeKey(window.ParameterManager.getCurrentScheme()));
+        }
+        // 点击「设为当前方案」
+        const applyBtn = doc.querySelector('#batchTable [data-batch-act="apply"]');
+        if (applyBtn) {
+            const doneBefore = (logText().match(/仿真计算完成/g) || []).length;
+            applyBtn.click();
+            const applied = await waitFor(() => (logText().match(/仿真计算完成/g) || []).length > doneBefore, 90000);
+            if (applied) {
+                ok('「设为当前方案」已把该组写入当前方案并重跑仿真',
+                    window.ParameterManager.schemeKey(window.ParameterManager.getCurrentScheme()));
+            } else {
+                bad('「设为当前方案」未触发复核仿真');
+            }
+        } else {
+            bad('批量方案清单中未渲染「设为当前方案」按钮');
+        }
+    } else {
+        bad('批量计算未完成', logText().slice(-250));
     }
 
     // -----------------------------------------------------------------------

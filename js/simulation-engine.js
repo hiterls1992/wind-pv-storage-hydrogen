@@ -1,43 +1,115 @@
 /**
- * 仿真计算引擎
- * 从 simulation_logic.py 1:1 翻译为纯 JavaScript
- * 设计为在 Web Worker 中运行
+ * ============================================================================
+ * 仿真计算引擎  ——  V2.2 参数体系重构版
+ * ============================================================================
+ * 从 simulation_logic.py 1:1 翻译为纯 JavaScript。
+ *
+ * ★★★ 本次重构只改「参数怎么传进来」，计算逻辑一行未动 ★★★
+ *   V2.1：runSingleSimulation(pv, wind, params, storagePower, storageDuration, electrolyzerCapacity)
+ *        —— 容量参数一部分藏在 params.PV_CAPACITY / WIND_CAPACITY 里，
+ *           另一部分作为裸数字参数传入，参数来源不统一（任务书 §11）。
+ *   V2.2：runSingleSimulation(pv, wind, scheme, simulationConfig)
+ *        —— 容量全部来自 scheme，运行规则全部来自 simulationConfig，彻底分离（§13 / §36）。
+ *
+ * ---------------------------------------------------------------------------
+ * 统一入口签名（任务书 §11 / §35）
+ * ---------------------------------------------------------------------------
+ *   runSingleSimulation(
+ *       pvData,            // Float64Array 光伏「单 MW 每小时电量」MWh/MW
+ *       windData,          // Float64Array 风电「单 MW 每小时电量」MWh/MW
+ *       scheme,            // { windCapacity, pvCapacity, storagePower, storageDuration, electrolyzerCapacity }
+ *       simulationConfig   // { electrolyzerMinRatio, maxExportHourly, maxExportTotal, maxImportRatio,
+ *                          //   chargeEfficiency, dischargeEfficiency, hydrogenConsumption }
+ *   )
+ *
+ * ---------------------------------------------------------------------------
+ * 单位约定（任务书 §46）—— 功率与电量不得混淆
+ * ---------------------------------------------------------------------------
+ *   输入 pvData / windData 为**单位容量（1 MW）的每小时电量** MWh/MW，
+ *   故「每小时电量 MWh = 单位容量电量 MWh/MW × 装机容量 MW」。
+ *   这一约定来自 V1.0 的 input.xlsx（表头为「光伏电量(MWh/MW)」「风电电量(MWh/MW)」），
+ *   V2.2 继续保持，且必须保持——改动会让全部历史结果失效。
+ *
+ *   容量 MW / 时长 h / 容量 MWh / 电量 MWh / 制氢量 kg / 制氢电耗 kWh/kg
  */
 
 /**
- * 执行单个参数组合的仿真计算
- * @param {Float64Array} pvData - 光伏单MW电量数据 (8760小时, MWh/MW)
- * @param {Float64Array} windData - 风电单MW电量数据 (8760小时, MWh/MW)
- * @param {Object} params - 仿真参数
- * @param {number} params.PV_CAPACITY - 光伏容量 MW
- * @param {number} params.WIND_CAPACITY - 风电容量 MW
- * @param {number} params.ELECTROLYZER_MIN_RATIO - 电解槽最低运行比例
- * @param {number} params.MAX_EXPORT_RATIO_HOURLY - 每小时上网比例上限
- * @param {number} params.MAX_EXPORT_RATIO_TOTAL - 总量上网比例上限
- * @param {number} params.MAX_IMPORT_RATIO - 下网电量比例上限
- * @param {number} params.STORAGE_CHARGE_EFFICIENCY - 储能充电效率
- * @param {number} params.STORAGE_DISCHARGE_EFFICIENCY - 储能放电效率
- * @param {number} params.HYDROGEN_ENERGY_CONSUMPTION - 制氢电耗 kWh/kg
- * @param {number} storagePower - 储能功率 MW
- * @param {number} storageDuration - 储能时长 小时
- * @param {number} electrolyzerCapacity - 电解槽容量 MW
- * @returns {Object} 仿真结果
+ * 参数解析：兼容 V2.1 旧签名，统一产出 { scheme, simulationConfig }。
+ *
+ * TODO V2.3 REMOVE LEGACY
+ *   兼容层仅为「不破坏已有调用方」而存在；业务逻辑必须逐步迁移到
+ *   runSingleSimulation(..., scheme, simulationConfig) 这一唯一形式（§43）。
  */
-function runSingleSimulation(pvData, windData, params, storagePower, storageDuration, electrolyzerCapacity) {
-    const PV_CAPACITY = params.PV_CAPACITY;
-    const WIND_CAPACITY = params.WIND_CAPACITY;
-    const ELECTROLYZER_MIN_RATIO = params.ELECTROLYZER_MIN_RATIO;
-    const MAX_EXPORT_RATIO_HOURLY = params.MAX_EXPORT_RATIO_HOURLY;
-    const MAX_EXPORT_RATIO_TOTAL = params.MAX_EXPORT_RATIO_TOTAL;
-    const MAX_IMPORT_RATIO = params.MAX_IMPORT_RATIO;
-    const CHARGE_EFF = params.STORAGE_CHARGE_EFFICIENCY;
-    const DISCHARGE_EFF = params.STORAGE_DISCHARGE_EFFICIENCY;
-    const H2_CONSUMPTION = params.HYDROGEN_ENERGY_CONSUMPTION;
+function resolveSimulationArgs(schemeOrParams, simulationConfig, legacyDuration, legacyElectrolyzer) {
+    // 判据：第 4 个形参（simulationConfig 位）为数字 → 说明调用方用的是 V2.1 旧签名
+    if (typeof simulationConfig === 'number') {
+        const p = schemeOrParams || {};
+        return {
+            scheme: {
+                windCapacity: p.WIND_CAPACITY,
+                pvCapacity: p.PV_CAPACITY,
+                storagePower: simulationConfig,
+                storageDuration: legacyDuration,
+                electrolyzerCapacity: legacyElectrolyzer,
+            },
+            simulationConfig: {
+                electrolyzerMinRatio: p.ELECTROLYZER_MIN_RATIO,
+                maxExportHourly: p.MAX_EXPORT_RATIO_HOURLY,
+                maxExportTotal: p.MAX_EXPORT_RATIO_TOTAL,
+                maxImportRatio: p.MAX_IMPORT_RATIO,
+                chargeEfficiency: p.STORAGE_CHARGE_EFFICIENCY,
+                dischargeEfficiency: p.STORAGE_DISCHARGE_EFFICIENCY,
+                hydrogenConsumption: p.HYDROGEN_ENERGY_CONSUMPTION,
+            },
+        };
+    }
+    return {
+        scheme: schemeOrParams || {},
+        simulationConfig: simulationConfig || {},
+    };
+}
 
-    const TOTAL_CAPACITY = PV_CAPACITY + WIND_CAPACITY;
-    const ELECTROLYZER_MIN = electrolyzerCapacity * ELECTROLYZER_MIN_RATIO;
-    const MAX_EXPORT_HOURLY = TOTAL_CAPACITY * MAX_EXPORT_RATIO_HOURLY;
-    const STORAGE_CAPACITY = storagePower * storageDuration;
+/**
+ * 执行单个方案（一个容量组合）的 8760 小时仿真计算。
+ *
+ * @param {Float64Array} pvData   光伏单 MW 每小时电量 (MWh/MW × hours)
+ * @param {Float64Array} windData 风电单 MW 每小时电量 (MWh/MW × hours)
+ * @param {Object} scheme         方案参数（唯一容量来源）
+ * @param {Object} simulationConfig 系统运行参数（不含任何容量）
+ * @returns {Object} 仿真结果 { results, ratioData, systemVars, sums, scheme, simulationConfig, filename }
+ */
+function runSingleSimulation(pvData, windData, scheme, simulationConfig, legacyDuration, legacyElectrolyzer) {
+    const parsed = resolveSimulationArgs(scheme, simulationConfig, legacyDuration, legacyElectrolyzer);
+
+    // ---- 类别 ①：方案参数（建多大）----
+    const {
+        windCapacity,
+        pvCapacity,
+        storagePower,
+        storageDuration,
+        electrolyzerCapacity,
+    } = parsed.scheme;
+
+    // ---- 类别 ②：系统运行参数（设备怎么运行）----
+    const {
+        electrolyzerMinRatio,
+        maxExportHourly,
+        maxExportTotal,
+        maxImportRatio,
+        chargeEfficiency,
+        dischargeEfficiency,
+        hydrogenConsumption,
+    } = parsed.simulationConfig;
+
+    // ---- 派生量 ----
+    const totalCapacity = pvCapacity + windCapacity;                   // MW
+    const electrolyzerMin = electrolyzerCapacity * electrolyzerMinRatio; // MW
+    const maxExportHourlyPower = totalCapacity * maxExportHourly;        // MW
+    const storageEnergy = storagePower * storageDuration;               // MWh（派生，禁止独立输入）
+
+    if (typeof pvData !== 'object' || pvData === null) throw new Error('runSingleSimulation: 缺少光伏 8760 小时数据');
+    if (typeof windData !== 'object' || windData === null) throw new Error('runSingleSimulation: 缺少风电 8760 小时数据');
+    if (pvData.length !== windData.length) throw new Error('runSingleSimulation: 光伏与风电数据长度不一致');
 
     const hours = pvData.length;
 
@@ -52,8 +124,8 @@ function runSingleSimulation(pvData, windData, params, storagePower, storageDura
     let totalExported = 0.0;
 
     for (let h = 0; h < hours; h++) {
-        const pv = pvData[h] * PV_CAPACITY;
-        const wind = windData[h] * WIND_CAPACITY;
+        const pv = pvData[h] * pvCapacity;
+        const wind = windData[h] * windCapacity;
         const total = pv + wind;
         totalGenerated += total;
 
@@ -64,47 +136,47 @@ function runSingleSimulation(pvData, windData, params, storagePower, storageDura
 
         let charge = 0, discharge = 0, hydrogenPower = 0, export_ = 0, importPower = 0, curtailment = 0, hydrogenProduction = 0;
 
-        if (total >= ELECTROLYZER_MIN) {
+        if (total >= electrolyzerMin) {
             // 情况1：风光电量足够维持最低制氢功率
             hydrogenPower = Math.min(total, electrolyzerCapacity);
-            let remaining = total - hydrogenPower;
+            const remaining = total - hydrogenPower;
 
             // 储能充电
-            const chargeCapacityLimit = (STORAGE_CAPACITY - storageRemaining) / CHARGE_EFF;
+            const chargeCapacityLimit = (storageEnergy - storageRemaining) / chargeEfficiency;
             const chargePowerLimit = storagePower;
             const chargePossible = Math.min(chargeCapacityLimit, chargePowerLimit);
             charge = Math.min(remaining, chargePossible);
-            storageRemaining += charge * CHARGE_EFF;
-            let remainingAfterCharge = remaining - charge;
+            storageRemaining += charge * chargeEfficiency;
+            const remainingAfterCharge = remaining - charge;
 
             // 上网电量
-            const exportHourlyLimit = MAX_EXPORT_HOURLY;
-            const exportTotalLimit = totalGenerated * MAX_EXPORT_RATIO_TOTAL;
+            const exportHourlyLimit = maxExportHourlyPower;
+            const exportTotalLimit = totalGenerated * maxExportTotal;
             const exportRemainingQuota = exportTotalLimit - totalExported;
             export_ = Math.min(remainingAfterCharge, exportHourlyLimit, exportRemainingQuota);
             curtailment = remainingAfterCharge - export_;
 
             totalExported += export_;
 
-            hydrogenProduction = hydrogenPower * 1000 / H2_CONSUMPTION;
+            hydrogenProduction = hydrogenPower * 1000 / hydrogenConsumption;
         } else {
             // 情况2：风光电量不足
-            const needed = ELECTROLYZER_MIN - total;
+            const needed = electrolyzerMin - total;
 
             // 储能放电
-            const dischargeCapacityLimit = storageRemaining * DISCHARGE_EFF;
+            const dischargeCapacityLimit = storageRemaining * dischargeEfficiency;
             const dischargePowerLimit = storagePower;
             const dischargePossible = Math.min(dischargeCapacityLimit, dischargePowerLimit);
             discharge = Math.min(needed, dischargePossible);
-            storageRemaining -= discharge / DISCHARGE_EFF;
+            storageRemaining -= discharge / dischargeEfficiency;
 
             const remainingNeeded = needed - discharge;
 
             // 下网电量
-            importPower = Math.min(remainingNeeded, TOTAL_CAPACITY * MAX_IMPORT_RATIO);
+            importPower = Math.min(remainingNeeded, totalCapacity * maxImportRatio);
             hydrogenPower = total + discharge + importPower;
 
-            hydrogenProduction = hydrogenPower * 1000 / H2_CONSUMPTION;
+            hydrogenProduction = hydrogenPower * 1000 / hydrogenConsumption;
         }
 
         results[idx + 3] = charge;
@@ -138,22 +210,22 @@ function runSingleSimulation(pvData, windData, params, storagePower, storageDura
 
     // 系统参数
     const systemVars = {
-        '光伏容量（MW）': PV_CAPACITY,
-        '风电容量（MW）': WIND_CAPACITY,
+        '光伏容量（MW）': pvCapacity,
+        '风电容量（MW）': windCapacity,
         '储能功率（MW）': storagePower,
         '储能时长（小时）': storageDuration,
         '电解槽容量（MW）': electrolyzerCapacity,
-        '电解槽最低运行比例': ELECTROLYZER_MIN_RATIO,
-        '原每小时上网比例上限': MAX_EXPORT_RATIO_HOURLY,
-        '新增总量上网比例上限': MAX_EXPORT_RATIO_TOTAL,
-        '下网电量比例上限': MAX_IMPORT_RATIO,
-        '储能充电效率': CHARGE_EFF,
-        '储能放电效率': DISCHARGE_EFF,
-        '每千克氢气耗电量（kWh/kg）': H2_CONSUMPTION,
-        '总容量（MW）': TOTAL_CAPACITY,
-        '电解槽最小运行功率（MW）': ELECTROLYZER_MIN,
-        '原每小时上网电量绝对上限（MW）': MAX_EXPORT_HOURLY,
-        '储能总容量（MWh）': STORAGE_CAPACITY,
+        '电解槽最低运行比例': electrolyzerMinRatio,
+        '原每小时上网比例上限': maxExportHourly,
+        '新增总量上网比例上限': maxExportTotal,
+        '下网电量比例上限': maxImportRatio,
+        '储能充电效率': chargeEfficiency,
+        '储能放电效率': dischargeEfficiency,
+        '每千克氢气耗电量（kWh/kg）': hydrogenConsumption,
+        '总容量（MW）': totalCapacity,
+        '电解槽最小运行功率（MW）': electrolyzerMin,
+        '原每小时上网电量绝对上限（MW）': maxExportHourlyPower,
+        '储能总容量（MWh）': storageEnergy,
     };
 
     return {
@@ -161,46 +233,26 @@ function runSingleSimulation(pvData, windData, params, storagePower, storageDura
         ratioData,
         systemVars,
         sums: { sumTotal, sumHydrogenPower, sumExport, sumImport, sumCurtailment, sumH2Prod },
-        filename: `OUTPUT-${electrolyzerCapacity}MW-${storagePower}MW-${storageDuration}H-${MAX_EXPORT_RATIO_TOTAL.toFixed(1)}.xlsx`
-    };
-}
-
-// 如果在 Worker 中运行，监听消息
-if (typeof self !== 'undefined' && typeof window === 'undefined') {
-    // Web Worker 环境
-    self.onmessage = function(e) {
-        const { type, params, inputData, storagePowerValues, storageDurationValues, electrolyzerValues } = e.data;
-
-        if (type === 'simulate') {
-            const pvData = new Float64Array(inputData.pv);
-            const windData = new Float64Array(inputData.wind);
-            const totalCombinations = storagePowerValues.length * storageDurationValues.length * electrolyzerValues.length;
-
-            self.postMessage({ type: 'log', msg: `共有 ${totalCombinations} 种参数组合需要计算` });
-            self.postMessage({ type: 'log', msg: `成功读取输入数据，共 ${pvData.length} 小时` });
-
-            const allResults = [];
-            let completed = 0;
-
-            for (const sp of storagePowerValues) {
-                for (const sd of storageDurationValues) {
-                    for (const ec of electrolyzerValues) {
-                        completed++;
-                        const progress = (completed / totalCombinations) * 100;
-                        self.postMessage({
-                            type: 'progress',
-                            progress,
-                            msg: `正在计算第 ${completed}/${totalCombinations} 种组合 (储能${sp}MW×${sd}h, 电解槽${ec}MW)...`
-                        });
-
-                        const result = runSingleSimulation(pvData, windData, params, sp, sd, ec);
-                        allResults.push(result);
-                    }
-                }
-            }
-
-            self.postMessage({ type: 'complete', results: allResults });
-        }
+        // 结果必须自带完整方案（任务书 §48）：不依赖文件名 / DOM / 全局变量判断结果对应哪个方案
+        scheme: {
+            windCapacity: windCapacity,
+            pvCapacity: pvCapacity,
+            storagePower: storagePower,
+            storageDuration: storageDuration,
+            storageEnergy: storageEnergy,
+            electrolyzerCapacity: electrolyzerCapacity,
+        },
+        // 结果同时记录运行参数，便于审计「这个结果是在什么运行规则下算出来的」
+        simulationConfig: {
+            electrolyzerMinRatio: electrolyzerMinRatio,
+            maxExportHourly: maxExportHourly,
+            maxExportTotal: maxExportTotal,
+            maxImportRatio: maxImportRatio,
+            chargeEfficiency: chargeEfficiency,
+            dischargeEfficiency: dischargeEfficiency,
+            hydrogenConsumption: hydrogenConsumption,
+        },
+        filename: `OUTPUT-${electrolyzerCapacity}MW-${storagePower}MW-${storageDuration}H-${maxExportTotal.toFixed(1)}.xlsx`
     };
 }
 

@@ -11,11 +11,22 @@ const DataSummary = {
      * @param {number} windCapacity - 风电容量 MW
      * @returns {Array} 汇总数据数组
      */
-    generateSummary(simulationResults, pvCapacity, windCapacity) {
+    generateSummary(simulationResults, schemeOrPvCapacity, legacyWindCapacity) {
         const summaryData = [];
+
+        // V2.2（任务书 §48 / §50）：容量参数一律取自「结果自带的 scheme」，
+        // 不再由调用方另外传一份容量进来造成第二处真值。
+        // TODO V2.3 REMOVE LEGACY：兼容 V2.1 旧签名 generateSummary(results, pvCapacity, windCapacity)
+        const legacyScheme = (typeof schemeOrPvCapacity === 'number')
+            ? { pvCapacity: schemeOrPvCapacity, windCapacity: legacyWindCapacity }
+            : (schemeOrPvCapacity || null);
 
         for (const simResult of simulationResults) {
             const { sums, systemVars, filename } = simResult;
+
+            const scheme = simResult.scheme || legacyScheme || {};
+            const pvCapacity = scheme.pvCapacity;
+            const windCapacity = scheme.windCapacity;
 
             // 制氢量 kg → 万吨
             const totalH2ProdTenThousandTons = Math.round(sums.sumH2Prod / 1e7 * 1000) / 1000;
