@@ -68,7 +68,16 @@ const ChartModule = {
     },
 
     /**
-     * 将仿真结果扁平数组转换为可读对象数组
+     * 【已废弃 · V2.3】将仿真结果扁平数组转换为可读对象数组。
+     *
+     * 该函数一次产生 8760 个对象 × 11 个属性（约数 MB 垃圾），是 V2.2 浏览器卡顿的
+     * 主要来源之一。V2.3 起**显示路径禁止调用**，改用 ResultDataStore 的 HourView
+     * （零对象分配）与 ChartDataAdapter（按需降采样）。
+     *
+     * 仅保留给「确实需要持久对象数组」的场景（如 Excel 导出），且应优先改用
+     * ResultDataStore.materialize(result)。
+     *
+     * TODO V2.4 REMOVE LEGACY
      */
     parseResults(resultsArray) {
         const COLS = 11;
@@ -120,7 +129,10 @@ const ChartModule = {
     renderOverviewChart(container, data, forExport = false) {
         const t = this._theme(forExport);
         const chart = this._initChart(container, forExport);
-        const hours = data.map((_, i) => i);
+        // V2.3：data 为 ResultDataStore 的 HourView（可能是降采样视图）。
+        // map 的第二个参数是「真实小时序号」，因此类别轴仍使用真实小时号，不因降采样而错位。
+        const hours = data.map((_, h) => h);
+        const axisInterval = data.axisInterval || Math.max(1, Math.floor(hours.length / 8));
         const ax = this._axisStyle(forExport);
 
         chart.setOption({
@@ -129,7 +141,7 @@ const ChartModule = {
             tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
             legend: { data: [...this.FLOW_POS, ...this.FLOW_NEG].map(s => s.key), bottom: 0, textStyle: { color: t.text } },
             grid: { left: 70, right: 40, top: 50, bottom: forExport ? 70 : 70 },
-            xAxis: { type: 'category', data: hours, name: '小时', axisLabel: { interval: 2160, color: t.text }, ...ax },
+            xAxis: { type: 'category', data: hours, name: '小时', axisLabel: { interval: axisInterval, color: t.text }, ...ax },
             yAxis: { type: 'value', name: 'MWh', ...ax },
             dataZoom: forExport ? [] : [{ type: 'inside' }, { type: 'slider', bottom: 30 }],
             animation: !forExport,
@@ -146,18 +158,20 @@ const ChartModule = {
         const t = this._theme(forExport);
         const chart = this._initChart(container, forExport);
         const colName = this.COL_NAMES[colKey] || colKey;
-        const hours = data.map((_, i) => i);
+        // V2.3：data 为 HourView（可能是降采样视图），map 的第二参数是真实小时序号
+        const hours = data.map((_, h) => h);
         const values = data.map(d => colKey === 'h2prod' ? d['制氢量'] / 1000 : d[colName]);
         const unit = colKey === 'h2prod' ? '吨' : 'MWh';
         const color = this.COLORS[colKey] || '#58a6ff';
         const ax = this._axisStyle(forExport);
+        const axisInterval = data.axisInterval || Math.max(1, Math.floor(hours.length / 8));
 
         chart.setOption({
             backgroundColor: t.bg,
             title: { text: `${colName}逐时曲线`, left: 'center', textStyle: { color: t.text } },
             tooltip: { trigger: 'axis', formatter: p => `第${p[0].axisValue}小时: ${p[0].value.toFixed(2)} ${unit}` },
             grid: { left: 70, right: 40, top: 50, bottom: forExport ? 50 : 70 },
-            xAxis: { type: 'category', data: hours, name: '小时', axisLabel: { interval: 2160, color: t.text }, ...ax },
+            xAxis: { type: 'category', data: hours, name: '小时', axisLabel: { interval: axisInterval, color: t.text }, ...ax },
             yAxis: { type: 'value', name: unit, ...ax },
             dataZoom: forExport ? [] : [{ type: 'inside' }, { type: 'slider', bottom: 30 }],
             animation: !forExport,
@@ -166,17 +180,34 @@ const ChartModule = {
         return chart;
     },
 
-    /** 逐月柱状图（9项独立柱） */
-    renderMonthlyChart(container, data, forExport = false) {
-        const t = this._theme(forExport);
-        const chart = this._initChart(container, forExport);
-        const ax = this._axisStyle(forExport);
-
-        const monthlyTotals = [];
+    /**
+     * 取 12 个月的分项合计（任务书 §18 / §19）。
+     *
+     * 优先路径：data 为 ResultDataStore 的「月度视图」（含 byLabel），直接读缓存，
+     *           完全不遍历 8760 小时；
+     * 兜底路径：data 为全分辨率 HourView / 旧对象数组，逐月 reduce（仅导出等低频场景）。
+     *
+     * @returns {Array<Object>} 长度 12，每项含 8 个 MWh 分项 + 制氢量(吨)
+     */
+    _monthlyTotals(data) {
+        if (data && data.byLabel) {
+            const b = data.byLabel;
+            return this.MONTH_NAMES.map((_, m) => ({
+                '光伏电量': b['光伏电量'][m],
+                '风电电量': b['风电电量'][m],
+                '储能放电量': b['储能放电量'][m],
+                '下网电量': b['下网电量'][m],
+                '储能充电量': b['储能充电量'][m],
+                '制氢电量': b['制氢电量'][m],
+                '上网电量': b['上网电量'][m],
+                '弃电量': b['弃电量'][m],
+                '制氢量(吨)': b['制氢量'][m] / 1000,
+            }));
+        }
+        const out = [];
         for (let m = 0; m < 12; m++) {
-            const start = this.MONTH_HOURS[m], end = this.MONTH_HOURS[m + 1];
-            const md = data.slice(start, end);
-            monthlyTotals.push({
+            const md = data.slice(this.MONTH_HOURS[m], this.MONTH_HOURS[m + 1]);
+            out.push({
                 '光伏电量': md.reduce((s, d) => s + d['光伏电量'], 0),
                 '风电电量': md.reduce((s, d) => s + d['风电电量'], 0),
                 '储能放电量': md.reduce((s, d) => s + d['储能放电量'], 0),
@@ -188,6 +219,38 @@ const ChartModule = {
                 '制氢量(吨)': md.reduce((s, d) => s + d['制氢量'], 0) / 1000,
             });
         }
+        return out;
+    },
+
+    /**
+     * 取 12 个月某列的合计（正负号按 FLOW 分组处理）。
+     * 优先读月度缓存，兜底逐月 reduce。
+     * @returns {Array<Array<number>>} [seriesIndex][month]
+     */
+    _monthlySeries(data, specs) {
+        const hasCache = !!(data && data.byLabel);
+        return specs.map(s => {
+            const label = s.key;
+            if (hasCache) {
+                const col = data.byLabel[label];
+                return this.MONTH_NAMES.map((_, m) => Math.round(col[m] * 100) / 100);
+            }
+            return this.MONTH_NAMES.map((_, m) => {
+                const md = data.slice(this.MONTH_HOURS[m], this.MONTH_HOURS[m + 1]);
+                return Math.round(md.reduce((sum, d) => sum + d[label], 0) * 100) / 100;
+            });
+        });
+    },
+
+    /** 逐月柱状图（9项独立柱） */
+    renderMonthlyChart(container, data, forExport = false) {
+        const t = this._theme(forExport);
+        const chart = this._initChart(container, forExport);
+        const ax = this._axisStyle(forExport);
+
+        // V2.3：月度合计统一取自 ResultDataStore 月度缓存（全分辨率、只算一次），
+        // 不再每次渲染都遍历 8760 小时（任务书 §18 / §19）
+        const monthlyTotals = this._monthlyTotals(data);
 
         const barCols = [
             { key: '光伏电量', color: this.COLORS.pv },
@@ -225,15 +288,11 @@ const ChartModule = {
         const chart = this._initChart(container, forExport);
         const ax = this._axisStyle(forExport);
 
-        // 按月汇总各项
-        const posData = this.FLOW_POS.map(s => this.MONTH_NAMES.map((_, m) => {
-            const md = data.slice(this.MONTH_HOURS[m], this.MONTH_HOURS[m + 1]);
-            return Math.round(md.reduce((sum, d) => sum + d[s.key], 0) * 100) / 100;
-        }));
-        const negData = this.FLOW_NEG.map(s => this.MONTH_NAMES.map((_, m) => {
-            const md = data.slice(this.MONTH_HOURS[m], this.MONTH_HOURS[m + 1]);
-            return -Math.round(md.reduce((sum, d) => sum + d[s.key], 0) * 100) / 100;
-        }));
+        // 按月汇总各项（V2.3：优先读 ResultDataStore 月度缓存，避免重复遍历 8760）
+        const posSeries = this._monthlySeries(data, this.FLOW_POS);
+        const negSeries = this._monthlySeries(data, this.FLOW_NEG);
+        const posData = this.FLOW_POS.map((s, i) => posSeries[i]);
+        const negData = this.FLOW_NEG.map((s, i) => negSeries[i].map(v => -v));
 
         chart.setOption({
             backgroundColor: t.bg,
@@ -353,9 +412,16 @@ const ChartModule = {
         const unit = isH2Ton ? '吨' : 'MWh';
         const color = this.COLORS[colKey] || '#58a6ff';
 
+        // V2.3：优先读 ResultDataStore 月度缓存（全分辨率、只算一次），避免重复遍历 8760
+        const hasCache = !!(data && data.byLabel);
         const monthlyValues = this.MONTH_NAMES.map((_, m) => {
-            const md = data.slice(this.MONTH_HOURS[m], this.MONTH_HOURS[m + 1]);
-            let sum = md.reduce((s, d) => s + d[rawColName], 0);
+            let sum;
+            if (hasCache) {
+                sum = data.byLabel[rawColName][m];
+            } else {
+                const md = data.slice(this.MONTH_HOURS[m], this.MONTH_HOURS[m + 1]);
+                sum = md.reduce((s, d) => s + d[rawColName], 0);
+            }
             if (isH2Ton) sum /= 1000;
             return Math.round(sum * 100) / 100;
         });
@@ -604,7 +670,24 @@ const ChartModule = {
     // ==================== 内部：图表初始化 ====================
 
     /** 初始化图表实例（在线预览用 dark 主题，导出用默认+白色背景） */
+    /**
+     * 获取（或复用）ECharts 实例。
+     *
+     * V2.3（任务书 §10）：在线预览路径**复用同一容器上的既有实例**，
+     * 只在切换图表类型时 setOption，不再 dispose + 重建。
+     * 复用前调用 clear() 清空旧 option，等价于 notMerge，避免残留上一次的系列。
+     *
+     * 导出路径（forExport=true）使用浅色主题且容器为一次性离屏节点，
+     * 每次新建实例，由调用方负责 dispose。
+     */
     _initChart(container, forExport) {
+        if (!forExport && typeof echarts !== 'undefined' && echarts.getInstanceByDom) {
+            const existing = echarts.getInstanceByDom(container);
+            if (existing && !existing.isDisposed()) {
+                existing.clear();
+                return existing;
+            }
+        }
         // 导出时使用 vega/light 风格：不传 'dark' 主题，避免 ECharts 注入深色背景
         return echarts.init(container, forExport ? null : 'dark');
     },
@@ -637,7 +720,16 @@ const ChartModule = {
      * @param {string} schemeLabel - 方案显示名称（用于 ZIP 文件名）
      */
     async exportSchemeCharts(simResult, schemeLabel) {
-        const data = this.parseResults(simResult.results);
+        // V2.3：不再 parseResults 物化 8760 个对象。
+        //   · 逐时类图 → 全分辨率 HourView（零对象分配）
+        //   · 月度类图 → 月度视图（读 ResultDataStore 缓存）
+        //   · 典型日/周 → 全分辨率区间视图（保证精确口径，不做降采样）
+        const DS = (typeof ResultDataStore !== 'undefined') ? ResultDataStore : null;
+        const fullView = DS
+            ? DS.ChartDataAdapter.getFullView(simResult)
+            : this.parseResults(simResult.results);   // 兜底：ResultDataStore 未加载
+        const monthView = DS ? DS.ChartDataAdapter.getMonthlyView(simResult) : fullView;
+        const data = fullView;
         const sv = simResult.systemVars;
         const suffix = `${sv['电解槽容量（MW）']}MW-${sv['储能功率（MW）']}MW-${sv['储能时长（小时）']}H`;
 
@@ -656,7 +748,7 @@ const ChartModule = {
 
             const tasks = [];
 
-            // 1. 逐时曲线 11 项
+            // 1. 逐时曲线 11 项（导出用全分辨率，保证报告图精度）
             const colKeys = ['pv', 'wind', 'total', 'charge', 'discharge', 'storage', 'hydrogen', 'export', 'import', 'curtailment', 'h2prod'];
             colKeys.forEach(key => {
                 tasks.push({ name: `${this.COL_NAMES[key]}-${suffix}.png`, render: () => this.renderHourlyChart(offDiv, data, key, true) });
@@ -666,10 +758,10 @@ const ChartModule = {
             tasks.push({ name: `能量流动汇总图-${suffix}.png`, render: () => this.renderOverviewChart(offDiv, data, true) });
 
             // 3. 逐月电量柱状图（9项）
-            tasks.push({ name: `逐月电量柱状图-${suffix}.png`, render: () => this.renderMonthlyChart(offDiv, data, true) });
+            tasks.push({ name: `逐月电量柱状图-${suffix}.png`, render: () => this.renderMonthlyChart(offDiv, monthView, true) });
 
             // 4. 逐月电量汇总图（7项正负堆叠）
-            tasks.push({ name: `逐月电量汇总图-${suffix}.png`, render: () => this.renderMonthlyOverviewChart(offDiv, data, true) });
+            tasks.push({ name: `逐月电量汇总图-${suffix}.png`, render: () => this.renderMonthlyOverviewChart(offDiv, monthView, true) });
 
             // 5. 典型日曲线 12 张（每月随机一天）
             typicalDays.forEach(({ month, dayStart }) => {
@@ -703,7 +795,7 @@ const ChartModule = {
                 const displayName = key === 'h2prod' ? '制氢量(吨)' : (this.COL_NAMES[key] || key);
                 tasks.push({
                     name: `${displayName}逐月汇总-${suffix}.png`,
-                    render: () => this.renderModuleMonthlyChart(offDiv, data, key, true),
+                    render: () => this.renderModuleMonthlyChart(offDiv, monthView, key, true),
                     size: [900, 500],
                 });
             });

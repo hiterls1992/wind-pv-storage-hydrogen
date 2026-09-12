@@ -440,9 +440,12 @@
 
         // ---- 1. 8760 小时仿真（唯一入口：容量走 scheme，运行规则走 simulationConfig） ----
         // 任务书 §36：禁止再把容量 Object.assign 进运行参数对象（PV_CAPACITY/WIND_CAPACITY 注入已删除）
+        // V2.3：记录仿真耗时，用于 Worker 性能诊断（只累加统计量，不影响任何计算）
+        const simT0 = nowMs();
         const sim = co.runSingleSimulation(
             pvData, windData, scheme, context.simulationConfig
         );
+        const simElapsedMs = nowMs() - simT0;
 
         // ---- 2. 年度技术指标（复用 data-summary.js） ----
         const summaryRow = co.DataSummary.generateSummary([sim], scheme.pvCapacity, scheme.windCapacity)[0];
@@ -560,7 +563,12 @@
 
         // ---- 写缓存 ----
         if (context.cache) context.cache.set(key, unified);
-        if (context.stats) context.stats.evaluated++;
+        if (context.stats) {
+            context.stats.evaluated++;
+            // V2.3：性能诊断用的累计耗时（§14），不参与任何优化计算
+            context.stats.evalTimeMs = (context.stats.evalTimeMs || 0) + (nowMs() - t0);
+            context.stats.simTimeMs = (context.stats.simTimeMs || 0) + simElapsedMs;
+        }
 
         return unified;
     }

@@ -12,7 +12,7 @@
         <div class="header-left">
             <span class="logo">⚡</span>
             <h1>多能互补系统仿真计算平台</h1>
-            <span class="version">WEB-V2.2</span>
+            <span class="version">WEB-V2.3</span>
             <span style="font-size:11px;color:#5a6a8a;letter-spacing:0;margin-left:6px">作者：hiterls1992</span>
         </div>
         <div class="header-right">
@@ -165,10 +165,23 @@
                             <button class="btn btn-sm btn-outline" id="btnExportExcel" disabled>📥 导出Excel</button>
                             <button class="btn btn-sm btn-outline" id="btnExportAllExcel" disabled>📥 批量导出</button>
                         </div>
-                        <div class="table-container">
-                            <table class="data-table" id="simulationTable">
-                                <thead><tr><th colspan="10">请先运行仿真计算</th></tr></thead>
+                        <!-- V2.3：虚拟滚动定位控件（任务书 §6 / §7）—— DOM 只保留可视区间 -->
+                        <div class="vt-controls">
+                            <span class="vt-label">当前小时</span>
+                            <b id="vtCurrentHour" class="vt-current">—</b>
+                            <button class="btn btn-sm btn-outline" id="vtFirst" type="button">⏮ 首页</button>
+                            <button class="btn btn-sm btn-outline" id="vtPrev" type="button">◀ 上一页</button>
+                            <button class="btn btn-sm btn-outline" id="vtNext" type="button">下一页 ▶</button>
+                            <button class="btn btn-sm btn-outline" id="vtLast" type="button">末页 ⏭</button>
+                            <span class="vt-label">跳转小时</span>
+                            <input type="number" id="vtJumpHour" class="vt-jump" min="0" max="8759" placeholder="0~8759">
+                            <span class="vt-range" id="vtRangeInfo">—</span>
+                        </div>
+                        <div class="table-container vt-container" id="simTableContainer">
+                            <table class="data-table vt-table" id="simulationTable">
+                                <thead><tr><th>小时</th></tr></thead>
                                 <tbody></tbody>
+                                <tfoot></tfoot>
                             </table>
                         </div>
                     </div>
@@ -868,6 +881,7 @@
     <!-- 应用模块 -->
     <script src="js/utils.js"></script>
     <script src="js/parameter-manager.js"></script>
+    <script src="js/result-data-store.js"></script>
     <script src="js/excel-io.js"></script>
     <script src="js/simulation-engine.js"></script>
     <script src="js/data-summary.js"></script>

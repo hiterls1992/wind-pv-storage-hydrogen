@@ -33,6 +33,7 @@ if (typeof importScripts !== 'function') {
     importScripts(
         'utils.js',
         'parameter-manager.js',
+        'result-data-store.js',
         'simulation-engine.js',
         'data-summary.js',
         'estimate.js',
@@ -42,6 +43,53 @@ if (typeof importScripts !== 'function') {
 
     /** 当前优化会话 */
     var currentSession = null;
+
+    /** 当前会话的上下文（用于读取引擎累计的性能统计） */
+    var currentCtx = null;
+
+    /**
+     * 性能诊断（任务书 §14）。
+     * 只记录耗时与计数，不参与任何优化计算。
+     */
+    var perf = null;
+
+    function perfBegin() {
+        perf = {
+            startedAt: Date.now(),
+            initMs: 0,
+            generationCount: 0,
+            generationTimeMs: 0,
+        };
+    }
+
+    /** 汇总性能统计并附到优化结果上 */
+    function perfAttach(result) {
+        if (!result) return result;
+        var st = (result.statistics) || {};
+        var ctxStats = (currentCtx && currentCtx.stats) || {};
+        var evaluated = st.totalEvaluated || ctxStats.evaluated || 0;
+        var cacheHits = st.cacheHits || ctxStats.cacheHits || 0;
+        var total = evaluated + cacheHits;
+        var totalMs = Date.now() - (perf ? perf.startedAt : Date.now());
+
+        result.performanceStats = {
+            mode: 'worker',
+            initMs: perf ? perf.initMs : 0,
+            totalMs: totalMs,
+            totalSeconds: Math.round(totalMs / 100) / 10,
+            generationsCompleted: st.generationsCompleted || perf.generationCount,
+            avgGenerationMs: perf && perf.generationCount > 0
+                ? Math.round(perf.generationTimeMs / perf.generationCount) : 0,
+            totalEvaluated: evaluated,
+            cacheHits: cacheHits,
+            cacheHitRate: total > 0 ? Math.round((cacheHits / total) * 1000) / 10 : 0,
+            avgEvaluateMs: evaluated > 0 ? Math.round((ctxStats.evalTimeMs || 0) / evaluated) : 0,
+            avgSimulateMs: evaluated > 0 ? Math.round((ctxStats.simTimeMs || 0) / evaluated) : 0,
+            /** 内存审计：优化结果对象只含指标，不含 8760 原始结果（§11） */
+            storesHourlyResults: false,
+        };
+        return result;
+    }
 
     /** 把主线程传入的数据统一还原为 Float64Array */
     function toFloat64(v, name) {
@@ -76,6 +124,9 @@ if (typeof importScripts !== 'function') {
                 onWarn: function (msg) { self.postMessage({ type: 'warn', message: msg }); }
             };
 
+            currentCtx = ctx;
+            perfBegin();
+
             currentSession = OptimizationEngine.createSession({
                 config: payload.config,
                 context: ctx,
@@ -83,7 +134,9 @@ if (typeof importScripts !== 'function') {
                 onGeneration: function (snap) { self.postMessage({ type: 'generation', progress: snap }); }
             });
 
+            var initT0 = Date.now();
             currentSession.ensureInitialized();
+            perf.initMs = Date.now() - initT0;
             tick();
         } catch (err) {
             currentSession = null;
@@ -101,10 +154,16 @@ if (typeof importScripts !== 'function') {
             if (currentSession.isCancelled() || currentSession.isFinished()) {
                 var result = currentSession.getResult();
                 currentSession = null;
+                perfAttach(result);
                 self.postMessage({ type: 'complete', result: result });
                 return;
             }
+            var gT0 = Date.now();
             currentSession.runNextGeneration();
+            if (perf) {
+                perf.generationTimeMs += Date.now() - gT0;
+                perf.generationCount++;
+            }
             setTimeout(tick, 0);
         } catch (err) {
             currentSession = null;

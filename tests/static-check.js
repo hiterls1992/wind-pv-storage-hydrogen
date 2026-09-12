@@ -32,9 +32,9 @@ const html = fs.readFileSync(HTML, 'utf8');
 // ---------------------------------------------------------------------------
 section('1. JavaScript 语法检查');
 const JS_FILES = [
-    'js/utils.js', 'js/parameter-manager.js', 'js/excel-io.js', 'js/simulation-engine.js',
-    'js/data-summary.js', 'js/estimate.js', 'js/finance-engine.js', 'js/chart-module.js',
-    'js/optimization-engine.js', 'js/optimization-worker.js', 'js/app.js',
+    'js/utils.js', 'js/parameter-manager.js', 'js/result-data-store.js', 'js/excel-io.js',
+    'js/simulation-engine.js', 'js/data-summary.js', 'js/estimate.js', 'js/finance-engine.js',
+    'js/chart-module.js', 'js/optimization-engine.js', 'js/optimization-worker.js', 'js/app.js',
 ];
 for (const f of JS_FILES) {
     const p = path.join(ROOT, f);
@@ -320,7 +320,112 @@ section('7. 参数唯一来源检查（V2.2 任务书 §12 / §36 / §50）');
 })();
 
 // ---------------------------------------------------------------------------
-section('8. 检查汇总');
+section('8. 数据流与性能契约（V2.3 任务书 §5 / §6 / §11 / §20 / §21）');
+(function () {
+    const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const app = read('js/app.js');
+    const chart = read('js/chart-module.js');
+    const store = read('js/result-data-store.js');
+    const worker = read('js/optimization-worker.js');
+
+    // 8.1 显示路径禁止再物化 8760 个行对象（§5）
+    //     app.js / chart-module.js 的**渲染与表格路径**不得调用 parseResults
+    //     （允许出现在：chart-module 内的废弃标记注释与导出兜底）
+    const bannedInApp = /ChartModule\.parseResults/.test(app);
+    if (!bannedInApp) ok('app.js 显示/表格/图表路径已全部改用 ResultDataStore（不再物化 8760 行对象）');
+    else bad('app.js 仍调用 ChartModule.parseResults（V2.3 禁止）');
+
+    // 8.2 ResultDataStore 基础接口齐全（§4）
+    const needApi = ['COLS', 'COL_COUNT', 'create', 'getValue', 'getHourRow', 'getRange',
+        'getColumn', 'getLength', 'getAnnualSummary', 'getMonthlySummary'];
+    const missApi = needApi.filter(k => store.indexOf(k + ':') < 0 && store.indexOf('function ' + k) < 0);
+    if (missApi.length === 0) ok('ResultDataStore 接口齐全（§4）', needApi.join(', '));
+    else bad('ResultDataStore 缺少接口', missApi.join(', '));
+
+    // 8.3 显示降采样不得回流到计算（§8）
+    if (store.indexOf('本函数输出**只允许用于绘图**') >= 0 && store.indexOf('禁止用于任何指标 / 约束计算') >= 0) {
+        ok('降采样接口已明确标注「仅用于绘图」');
+    } else {
+        bad('降采样接口缺少「禁止用于指标计算」的警示标注');
+    }
+
+    // 8.4 逐时表必须虚拟滚动，禁止一次性生成 8760 行（§6）
+    if (app.indexOf('function renderSimTableRows') >= 0 && app.indexOf('BUFFER_ROWS') >= 0
+        && app.indexOf('vt-spacer') >= 0) {
+        ok('逐时表已实现虚拟滚动（可视区间 + 缓冲 + 占位行）');
+    } else {
+        bad('逐时表未实现虚拟滚动');
+    }
+    if (/for \(let h = 0; h < .*8760/.test(app) === false && app.indexOf('vt-spacer') >= 0) {
+        ok('逐时表不再一次性拼接全部行');
+    }
+    if (/ROW_HEIGHT|rowHeight/.test(app)) ok('虚拟滚动使用固定行高计算可视区间');
+
+    // 8.5 图表实例复用，切换类型不再 dispose（§10）
+    if (chart.indexOf('echarts.getInstanceByDom') >= 0 && chart.indexOf('existing.clear()') >= 0) {
+        ok('ECharts 实例按容器复用并 clear() 旧 option（不再 dispose 重建）');
+    } else {
+        bad('ECharts 实例未复用');
+    }
+    if (app.indexOf('AppState.currentChart.dispose()') < 0) {
+        ok('updateChart 不再销毁图表实例');
+    } else {
+        bad('updateChart 仍会 dispose 图表实例');
+    }
+
+    // 8.6 优化阶段不保存 8760 原始结果（§11）
+    if (store.indexOf('OptimizationResultCache') >= 0 && store.indexOf('strip(result)') >= 0
+        && worker.indexOf('storesHourlyResults: false') >= 0) {
+        ok('优化缓存只保存指标（OptimizationResultCache.strip + Worker 内存审计字段）');
+    } else {
+        bad('优化结果内存约束未落实');
+    }
+
+    // 8.7 月度统计只算一次（§18 / §19）
+    if (store.indexOf('_monthly') >= 0 && store.indexOf('getMonthlyColumn') >= 0
+        && chart.indexOf('_monthlyTotals') >= 0) {
+        ok('月度摘要统一缓存，图表不再每次渲染遍历 8760 小时');
+    } else {
+        bad('月度统计未走统一缓存');
+    }
+
+    // 8.8 日志限长（§20）
+    if (app.indexOf('MAX_LOG_LINES') >= 0) ok('日志已限长（MAX_LOG_LINES）');
+    else bad('日志未限长');
+
+    // 8.9 禁止循环内 innerHTML +=（§21）
+    const loopAppend = [];
+    for (const f of JS_FILES) {
+        const src = read(f);
+        const re = /while\s*\([^)]*\)\s*\{[^}]*innerHTML\s*\+=|for\s*\([^)]*\)\s*\{[^}]*innerHTML\s*\+=/gs;
+        if (re.test(src)) loopAppend.push(f);
+    }
+    if (loopAppend.length === 0) ok('无「循环内 innerHTML +=」的写法');
+    else bad('仍存在循环内 innerHTML +=', loopAppend.join(', '));
+
+    // 8.10 Worker 优先 + 诊断（§13 / §14 / §17）
+    if (worker.indexOf('performanceStats') >= 0 && worker.indexOf('cacheHitRate') >= 0) {
+        ok('Worker 输出性能诊断（performanceStats）');
+    } else {
+        bad('Worker 缺少性能诊断');
+    }
+    if (app.indexOf('worker.onerror') >= 0 && app.indexOf('diagnose') >= 0) {
+        ok('Worker 失败原因已分类上报（不静默回退）');
+    } else {
+        bad('Worker 失败缺少诊断');
+    }
+
+    // 8.11 Worker 必须加载结果数据层（§13：全部计算在 Worker 内完成）
+    if (worker.indexOf("'result-data-store.js'") >= 0) ok('Worker 已加载 result-data-store.js');
+    else bad('Worker 未加载 result-data-store.js');
+
+    // 8.12 主线程时间片（§16）
+    if (/CHUNK_MS = 1[0-5]\b/.test(app)) ok('主线程 Fallback 时间片已降至 10~15ms');
+    else bad('主线程 Fallback 时间片未调整（应为 10~15ms）');
+})();
+
+// ---------------------------------------------------------------------------
+section('9. 检查汇总');
 lines.push('  PASS：' + pass + ' 项');
 lines.push('  FAIL：' + fail + ' 项');
 lines.push('  结论：' + (fail === 0 ? '全部通过 ✅' : '存在失败项 ❌'));

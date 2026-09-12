@@ -28,11 +28,36 @@
     };
 
     // ========== 日志系统 ==========
+    /**
+     * 日志上限（任务书 §20）：优化过程中日志会持续增长，
+     * innerHTML += 每次都全量重解析整个容器，且 DOM 无限膨胀。
+     * 超过上限后删除最早的行，保证 DOM 规模恒定。
+     */
+    const MAX_LOG_LINES = 300;
+
     function log(message, type = 'info') {
         const logContent = document.getElementById('logContent');
         const time = Utils.timeNow();
         const cls = type === 'error' ? 'log-error' : type === 'success' ? 'log-success' : type === 'warn' ? 'log-warn' : 'log-msg';
-        logContent.innerHTML += `<div><span class="log-time">[${time}]</span> <span class="${cls}">${message}</span></div>`;
+
+        // 一次性构建节点并追加（禁止在循环中 innerHTML +=）
+        const row = document.createElement('div');
+        const t = document.createElement('span');
+        t.className = 'log-time';
+        t.textContent = `[${time}]`;
+        const m = document.createElement('span');
+        m.className = cls;
+        m.textContent = message;          // textContent 而非 innerHTML，杜绝注入与重复解析
+        row.appendChild(t);
+        row.appendChild(document.createTextNode(' '));
+        row.appendChild(m);
+        logContent.appendChild(row);
+
+        // 限长：一次性删除超量的旧行
+        const over = logContent.childElementCount - MAX_LOG_LINES;
+        if (over > 0) {
+            for (let i = 0; i < over; i++) logContent.removeChild(logContent.firstChild);
+        }
         logContent.scrollTop = logContent.scrollHeight;
     }
 
@@ -300,20 +325,29 @@
         log(`仿真计算完成！共 ${results.length} 个方案`, 'success');
 
         // 填充方案选择器（方案编号统一取自结果自带的 scheme，§48 / §49）
+        // V2.3：DocumentFragment 一次性插入，禁止循环内 innerHTML +=（任务书 §21）
         const sel = document.getElementById('schemeSelect');
         const chartSel = document.getElementById('chartSchemeSelect');
         sel.innerHTML = '';
         chartSel.innerHTML = '';
 
+        const fragA = document.createDocumentFragment();
+        const fragB = document.createDocumentFragment();
         results.forEach((r, i) => {
             const sv = r.systemVars;
             const label = r.scheme
                 ? ParameterManager.schemeKey(r.scheme)
                 : `方案${i + 1}`;
             const optText = `${label}: 电解槽${sv['电解槽容量（MW）']}MW, 储能${sv['储能功率（MW）']}MW×${sv['储能时长（小时）']}h`;
-            sel.innerHTML += `<option value="${i}">${optText}</option>`;
-            chartSel.innerHTML += `<option value="${i}">${optText}</option>`;
+            const o1 = document.createElement('option');
+            o1.value = String(i);
+            o1.textContent = optText;
+            const o2 = o1.cloneNode(true);
+            fragA.appendChild(o1);
+            fragB.appendChild(o2);
         });
+        sel.appendChild(fragA);
+        chartSel.appendChild(fragB);
 
         // 启用按钮
         document.getElementById('btnExportExcel').disabled = false;
@@ -343,69 +377,260 @@
         }
     }
 
+    // ==================================================================
+    // ========== 逐时数据表（V2.3 虚拟滚动，任务书 §6 / §7）==========
+    // ==================================================================
+    //
+    // V2.2 的问题：一次性生成 8760 行 × 12 列 ≈ 10.5 万个 DOM 节点，
+    // 且每次切换方案都重建 —— 这是浏览器卡顿的首要来源。
+    //
+    // V2.3 的做法：
+    //   · 数据仍是完整的 8760 小时（Float64Array，经 ResultDataStore 零拷贝读取）；
+    //   · DOM 只保留「视口内 + 上下缓冲」约 50~120 行；
+    //   · 滚动时只重算可视区间并重建这一小段 DOM；
+    //   · 「总和」行放入 <tfoot>，始终可见且不参与虚拟化；
+    //   · 提供跳转小时 / 首页 / 上一页 / 下一页 / 末页 定位。
+
+    /**
+     * 取（或惰性创建）某个仿真结果的统一结果记录。
+     * 结果层只有一个数据源：results 仍是原始 Float64Array，零拷贝（任务书 §4 / §26）。
+     * 同时登记到 SimulationResultCache —— 只保留用户实际查看过的方案（§19）。
+     */
+    function ensureResultStore(simResult) {
+        if (!simResult._store) {
+            simResult._store = ResultDataStore.create(simResult.results, simResult.scheme, {
+                simulationConfig: simResult.simulationConfig,
+                systemVars: simResult.systemVars,
+                ratioData: simResult.ratioData,
+                sums: simResult.sums,
+                filename: simResult.filename,
+            });
+            ResultDataStore.SimulationResultCache.put(simResult._store);
+        }
+        return simResult._store;
+    }
+
+    const SimTable = {
+        ROW_HEIGHT: 28,     // 行高（首帧后按实际渲染高度校准）
+        BUFFER_ROWS: 10,    // 视口上下各多渲染的行数，滚动时不露白
+        PAGE_ROWS: 240,     // 上一页 / 下一页滚动的行数
+        result: null,       // ResultDataStore 结果记录
+        cols: [],           // 列定义
+        totalRows: 0,
+        rowHeight: 28,
+        rendered: { start: -1, end: -1 },
+    };
+
+    /** 逐时表的列定义（顺序与 simulation-engine.js 的输出列严格一致） */
+    const SIM_TABLE_COLS = [
+        { header: '光伏电量(MWh)',     col: 'pv' },
+        { header: '风电电量(MWh)',     col: 'wind' },
+        { header: '合计电量(MWh)',     col: 'total' },
+        { header: '储能充电电量(MWh)', col: 'charge' },
+        { header: '储能放电电量(MWh)', col: 'discharge' },
+        { header: '储能现存容量(MWh)', col: 'storage', takeLast: true },
+        { header: '制氢电量(MWh)',     col: 'hydrogenEnergy' },
+        { header: '上网电量(MWh)',     col: 'export' },
+        { header: '下网电量(MWh)',     col: 'import' },
+        { header: '弃电量(MWh)',       col: 'curtailment' },
+        { header: '制氢量(kg)',        col: 'hydrogen' },
+    ];
+
+    /**
+     * 显示某个方案的逐时数据表（虚拟滚动版）。
+     * @param {number} index AppState.simulationResults 的下标
+     */
     function displaySimulationTable(index) {
-        const result = AppState.simulationResults[index];
-        if (!result) return;
-
-        const data = ChartModule.parseResults(result.results);
-        const COLS = 11;
-        // 列定义：表头、原始数据 key、是否求和、是否取末值
-        // ⚠️ 原始 key 必须与 chart-module.js:75 parseResults() 完全一致
-        // ⚠️ 单位：11 列电量字段均为 MWh（功率×1h），制氢量为 kg，储能现存容量为 MWh
-        const dataCols = [
-            { header: '光伏电量(MWh)',     key: '光伏电量',     sum: true  },
-            { header: '风电电量(MWh)',     key: '风电电量',     sum: true  },
-            { header: '合计电量(MWh)',     key: '合计电量',     sum: true  },
-            { header: '储能充电电量(MWh)', key: '储能充电量',   sum: true  },
-            { header: '储能放电电量(MWh)', key: '储能放电量',   sum: true  },
-            { header: '储能现存容量(MWh)', key: '储能现存容量', sum: false, takeLast: true },
-            { header: '制氢电量(MWh)',     key: '制氢电量',     sum: true  },
-            { header: '上网电量(MWh)',     key: '上网电量',     sum: true  },
-            { header: '下网电量(MWh)',     key: '下网电量',     sum: true  },
-            { header: '弃电量(MWh)',       key: '弃电量',       sum: true  },
-            { header: '制氢量(kg)',        key: '制氢量',       sum: true  }
-        ];
-
-        const table = document.getElementById('simulationTable');
-        let html = '<thead><tr><th>小时</th>';
-        for (const c of dataCols) html += `<th>${c.header}</th>`;
-        html += '</tr></thead><tbody>';
-
-        for (let h = 0; h < data.length; h++) {
-            html += '<tr>';
-            html += `<td>${h}</td>`;
-            for (const c of dataCols) {
-                html += `<td>${data[h][c.key].toFixed(2)}</td>`;
-            }
-            html += '</tr>';
+        const simResult = AppState.simulationResults[index];
+        if (!simResult) return;
+        if (typeof ResultDataStore === 'undefined') {
+            // 防御：结果数据层未加载时给出可读提示，而不是静默失败
+            document.getElementById('simulationTable').innerHTML =
+                '<thead><tr><th>结果数据层未加载（js/result-data-store.js）</th></tr></thead><tbody></tbody>';
+            return;
         }
 
-        // 总和行（与表头 11 列一一对应）
-        const rawResults = result.results;
-        const rows = rawResults.length / COLS;
-        html += '<tr>';
-        html += '<td><b>总和</b></td>';
-        for (const c of dataCols) {
-            let v;
-            if (c.takeLast) {
-                v = rawResults[(rows - 1) * COLS + colIndexOf(c.key)];
-            } else {
-                let s = 0;
-                for (let h = 0; h < rows; h++) s += rawResults[h * COLS + colIndexOf(c.key)];
-                v = s;
-            }
-            html += `<td><b>${v.toFixed(2)}</b></td>`;
+        // ---- 结果层：把原始结果包装成统一结果记录（零拷贝），并注册到查看缓存 ----
+        SimTable.result = ensureResultStore(simResult);
+        SimTable.cols = SIM_TABLE_COLS;
+        SimTable.totalRows = SimTable.result.hours;
+        SimTable.rendered = { start: -1, end: -1 };
+
+        buildSimTableHead();
+        buildSimTableFoot();
+        renderSimTableRows(true);
+    }
+
+    /** 表头 + 列宽（一次性构建；table-layout:fixed 使列宽稳定且首帧更快） */
+    function buildSimTableHead() {
+        const table = document.getElementById('simulationTable');
+        const thead = table.tHead || table.querySelector('thead');
+        let html = '<colgroup><col style="width:64px">';
+        for (let i = 0; i < SimTable.cols.length; i++) html += '<col>';
+        html += '</colgroup><tr><th>小时</th>';
+        for (const c of SimTable.cols) html += `<th>${c.header}</th>`;
+        html += '</tr>';
+        thead.innerHTML = html;
+    }
+
+    /** 「总和」行放入 tfoot：始终可见，不参与虚拟化（§18：复用年度摘要，不再二次遍历） */
+    function buildSimTableFoot() {
+        const table = document.getElementById('simulationTable');
+        let tfoot = table.tFoot;
+        if (!tfoot) {
+            tfoot = document.createElement('tfoot');
+            table.appendChild(tfoot);
+        }
+        const annual = ResultDataStore.getAnnualSummary(SimTable.result);
+        let html = '<tr><td><b>总和</b></td>';
+        for (const c of SimTable.cols) {
+            const v = annual.byLabel[ResultDataStore.COL_LABELS[ResultDataStore.COLS[c.col]]];
+            html += `<td><b>${Number(v).toFixed(2)}</b></td>`;
         }
         html += '</tr>';
+        tfoot.innerHTML = html;
+    }
 
-        html += '</tbody>';
-        table.innerHTML = html;
+    /** 只渲染可视区间内的行（含上下缓冲） */
+    function renderSimTableRows(force) {
+        const st = SimTable;
+        if (!st.result) return;
+        const container = document.getElementById('simTableContainer');
+        const tbody = document.getElementById('simulationTable').tBodies[0];
+        if (!container || !tbody) return;
 
-        // 原始结果数组里的列索引（与 simulation-engine.js 列顺序完全一致）
-        function colIndexOf(key) {
-            const order = ['光伏电量', '风电电量', '合计电量', '储能充电量', '储能放电量',
-                           '储能现存容量', '制氢电量', '上网电量', '下网电量', '弃电量', '制氢量'];
-            return order.indexOf(key);
+        const scrollTop = container.scrollTop;
+        const viewport = container.clientHeight || 480;
+        const rowH = st.rowHeight;
+
+        const first = Math.max(0, Math.floor(scrollTop / rowH) - st.BUFFER_ROWS);
+        const visible = Math.ceil(viewport / rowH) + st.BUFFER_ROWS * 2;
+        const last = Math.min(st.totalRows, first + visible);
+
+        if (!force && first === st.rendered.start && last === st.rendered.end) return;
+        st.rendered = { start: first, end: last };
+
+        const frag = document.createDocumentFragment();
+        const spacerTd = () => {
+            const td = document.createElement('td');
+            td.className = 'vt-spacer-cell';
+            return td;
+        };
+
+        // 顶部占位（撑起已滚过的高度，使滚动条长度与 8760 行一致）
+        if (first > 0) {
+            const tr = document.createElement('tr');
+            tr.className = 'vt-spacer';
+            for (let i = 0; i <= st.cols.length; i++) {
+                const td = spacerTd();
+                if (i === 0) td.style.height = (first * rowH) + 'px';
+                tr.appendChild(td);
+            }
+            frag.appendChild(tr);
+        }
+
+        // 可视数据行（直接读 Float64Array，不产生行对象）
+        for (let h = first; h < last; h++) {
+            const tr = document.createElement('tr');
+            const tdH = document.createElement('td');
+            tdH.textContent = h;
+            tr.appendChild(tdH);
+            for (const c of st.cols) {
+                const td = document.createElement('td');
+                td.textContent = ResultDataStore.getValue(st.result, h, c.col).toFixed(2);
+                tr.appendChild(td);
+            }
+            frag.appendChild(tr);
+        }
+
+        // 底部占位
+        if (last < st.totalRows) {
+            const tr = document.createElement('tr');
+            tr.className = 'vt-spacer';
+            for (let i = 0; i <= st.cols.length; i++) {
+                const td = spacerTd();
+                if (i === 0) td.style.height = ((st.totalRows - last) * rowH) + 'px';
+                tr.appendChild(td);
+            }
+            frag.appendChild(tr);
+        }
+
+        tbody.innerHTML = '';
+        tbody.appendChild(frag);
+
+        // 首帧后校准实际行高（不同 DPI / 字体下 28px 可能有偏差）
+        if (tbody.rows.length > 0) {
+            const sample = tbody.rows[first > 0 ? 1 : 0];
+            const real = sample ? sample.getBoundingClientRect().height : 0;
+            if (real > 4 && Math.abs(real - st.rowHeight) > 0.5) {
+                st.rowHeight = real;
+                if (force) { st.rendered = { start: -1, end: -1 }; renderSimTableRows(true); return; }
+            }
+        }
+
+        updateSimTableStatus(first, last);
+    }
+
+    /** 定位状态栏：当前小时 / 可视区间 */
+    function updateSimTableStatus(first, last) {
+        const cur = document.getElementById('vtCurrentHour');
+        const range = document.getElementById('vtRangeInfo');
+        if (cur) cur.textContent = String(first);
+        if (range) {
+            range.textContent = `显示第 ${first} ~ ${Math.max(first, last - 1)} 小时 / 共 ${SimTable.totalRows} 小时（DOM 仅 ${Math.max(0, last - first)} 行）`;
+        }
+    }
+
+    /** 跳转到指定小时（§7） */
+    function jumpSimTableTo(hour) {
+        const st = SimTable;
+        if (!st.result) return;
+        const h = Math.max(0, Math.min(st.totalRows - 1, Math.round(Number(hour) || 0)));
+        const container = document.getElementById('simTableContainer');
+        if (!container) return;
+        container.scrollTop = h * st.rowHeight;
+        renderSimTableRows(false);
+        updateSimTableStatus(h, h + 1);
+        const input = document.getElementById('vtJumpHour');
+        if (input) input.value = String(h);
+    }
+
+    /** 逐时表翻页 / 跳转控件 */
+    function initSimTableControls() {
+        const container = document.getElementById('simTableContainer');
+        if (!container) return;
+
+        // 滚动 → 只重绘可视区间（rAF 节流，一帧最多一次）
+        let rafPending = false;
+        container.addEventListener('scroll', () => {
+            if (rafPending) return;
+            rafPending = true;
+            requestAnimationFrame(() => {
+                rafPending = false;
+                renderSimTableRows(false);
+            });
+        }, { passive: true });
+
+        // 容器尺寸变化时重算可视行数
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(() => renderSimTableRows(true)).observe(container);
+        }
+
+        const on = (id, fn) => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('click', fn);
+        };
+        on('vtFirst', () => jumpSimTableTo(0));
+        on('vtPrev', () => jumpSimTableTo((SimTable.rendered.start || 0) - SimTable.PAGE_ROWS));
+        on('vtNext', () => jumpSimTableTo((SimTable.rendered.start || 0) + SimTable.PAGE_ROWS));
+        on('vtLast', () => jumpSimTableTo(SimTable.totalRows - 1));
+
+        const input = document.getElementById('vtJumpHour');
+        if (input) {
+            input.addEventListener('change', () => jumpSimTableTo(input.value));
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') jumpSimTableTo(input.value);
+            });
         }
     }
 
@@ -416,47 +641,61 @@
 
         if (isNaN(schemeIdx) || !AppState.simulationResults[schemeIdx]) return;
 
-        // 销毁旧图表
-        if (AppState.currentChart) {
-            AppState.currentChart.dispose();
-            AppState.currentChart = null;
-        }
+        const simResult = AppState.simulationResults[schemeIdx];
+        const DS = (typeof ResultDataStore !== 'undefined') ? ResultDataStore : null;
+        if (!DS) { log('结果数据层未加载，图表不可用', 'error'); return; }
 
-        chartContainer.innerHTML = '';
-        const data = ChartModule.parseResults(AppState.simulationResults[schemeIdx].results);
+        // 结果层：与逐时表共用同一条结果记录（零拷贝）
+        const store = ensureResultStore(simResult);
 
-        // 月份选择器（典型日/周使用）
+        // V2.3：不再 dispose + innerHTML='' 重建。
+        // _initChart 会复用同一容器上的既有实例并 clear() 旧 option（任务书 §10）。
         const monthSelect = document.getElementById('chartMonthSelect');
         const month = monthSelect ? parseInt(monthSelect.value) : 0;
 
         switch (chartType) {
             case 'overview':
-                AppState.currentChart = ChartModule.renderOverviewChart(chartContainer, data);
+                // 全年 7 条曲线 → 降采样显示（仅绘图，不参与任何指标计算）
+                AppState.currentChart = ChartModule.renderOverviewChart(chartContainer,
+                    DS.ChartDataAdapter.getOverviewView(store));
                 break;
-            case 'hourly':
+            case 'hourly': {
                 const colKey = document.getElementById('chartColumnSelect').value;
-                AppState.currentChart = ChartModule.renderHourlyChart(chartContainer, data, colKey);
+                AppState.currentChart = ChartModule.renderHourlyChart(chartContainer,
+                    DS.ChartDataAdapter.getHourlyView(store, colKey), colKey);
                 break;
+            }
             case 'monthly':
-                AppState.currentChart = ChartModule.renderMonthlyChart(chartContainer, data);
+                AppState.currentChart = ChartModule.renderMonthlyChart(chartContainer,
+                    DS.ChartDataAdapter.getMonthlyView(store));
                 break;
             case 'monthly-overview':
-                AppState.currentChart = ChartModule.renderMonthlyOverviewChart(chartContainer, data);
+                AppState.currentChart = ChartModule.renderMonthlyOverviewChart(chartContainer,
+                    DS.ChartDataAdapter.getMonthlyView(store));
                 break;
             case 'monthly-detail':
-                AppState.currentChart = ChartModule.renderMonthlyDetailChart(chartContainer, data, month);
+                AppState.currentChart = ChartModule.renderMonthlyDetailChart(chartContainer,
+                    DS.ChartDataAdapter.getRangeView(store, ChartModule.MONTH_HOURS[month],
+                        ChartModule.MONTH_HOURS[month + 1] - ChartModule.MONTH_HOURS[month]), month);
                 break;
             case 'module-monthly': {
                 const mColKey = document.getElementById('chartColumnSelect').value;
-                AppState.currentChart = ChartModule.renderModuleMonthlyChart(chartContainer, data, mColKey);
+                AppState.currentChart = ChartModule.renderModuleMonthlyChart(chartContainer,
+                    DS.ChartDataAdapter.getMonthlyView(store), mColKey);
                 break;
             }
-            case 'typical-day':
-                AppState.currentChart = ChartModule.renderTypicalDayChart(chartContainer, data, month);
+            case 'typical-day': {
+                const cum = ChartModule._monthCumulativeHours();
+                AppState.currentChart = ChartModule.renderTypicalDayChart(chartContainer,
+                    DS.ChartDataAdapter.getRangeView(store, cum[month], 24), month);
                 break;
-            case 'typical-week':
-                AppState.currentChart = ChartModule.renderTypicalWeekChart(chartContainer, data, month);
+            }
+            case 'typical-week': {
+                const cum = ChartModule._monthCumulativeHours();
+                AppState.currentChart = ChartModule.renderTypicalWeekChart(chartContainer,
+                    DS.ChartDataAdapter.getRangeView(store, cum[month], 168), month);
                 break;
+            }
         }
     }
 
@@ -494,14 +733,8 @@
         if (isNaN(idx)) return;
 
         const result = AppState.simulationResults[idx];
-        const data = ChartModule.parseResults(result.results);
-
-        // 构造hourlyData格式
-        const hourlyData = data.map(row => {
-            const obj = {};
-            for (const k of Object.keys(row)) obj[k] = row[k];
-            return obj;
-        });
+        // V2.3：导出确实需要对象数组，此处显式物化一次（仅导出场景，任务书 §5）
+        const hourlyData = ResultDataStore.materialize(ensureResultStore(result));
 
         const resultData = {
             hourlyData,
@@ -522,8 +755,8 @@
         const folder = zip.folder('simulation_results');
 
         for (const result of AppState.simulationResults) {
-            const data = ChartModule.parseResults(result.results);
-            const hourlyData = data.map(row => { const obj = {}; for (const k of Object.keys(row)) obj[k] = row[k]; return obj; });
+            // V2.3：导出按需物化对象数组（仅导出场景，任务书 §5）
+            const hourlyData = ResultDataStore.materialize(ensureResultStore(result));
             const buffer = await ExcelIO.exportSimulationResult({ hourlyData, systemVars: result.systemVars, ratioData: result.ratioData });
             folder.file(result.filename, buffer);
         }
@@ -699,10 +932,17 @@
         // 因此经评模块只需读取这一个文件即可，无需再合并数据汇总文件
         AppState.financeMergedData = AppState.financeEstimateData;
 
+        // V2.3：DocumentFragment 一次性插入（任务书 §21）
+        const frag = document.createDocumentFragment();
         AppState.financeMergedData.forEach((row, i) => {
             const name = `方案${i + 1}: ${row['文件名称']}`;
-            sel.innerHTML += `<option value="${i}">${name}</option>`;
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = name;
+            frag.appendChild(opt);
         });
+        sel.innerHTML = '';
+        sel.appendChild(frag);
 
         document.getElementById('financeSchemeArea').style.display = '';
         document.getElementById('btnRunFinance').disabled = false;
@@ -1327,9 +1567,29 @@
         OptState.worker = worker;
         OptState.mode = 'worker';
         optEl('optEngineMode').textContent = '计算模式：Web Worker（后台线程）';
+        optLog('已启用 Web Worker：NSGA-II + 8760 仿真 + 概算 + 财务评价全部在后台线程执行', 'info');
 
         let gotProgress = false;
         let failed = false;
+
+        /**
+         * Worker 启动/运行失败诊断（任务书 §17）。
+         * 不静默回退：把失败原因分类后写入日志，便于定位是
+         * 「脚本加载被拦截」「依赖缺失」还是「运行期异常」。
+         */
+        const diagnose = (e) => {
+            const msg = (e && (e.message || e.reason)) || '';
+            if (/cannot be accessed from origin|SecurityError|file:\/\//i.test(msg)) {
+                return 'Worker 脚本被浏览器安全策略拦截（file:// 直开属正常现象）';
+            }
+            if (/importScripts|404|Failed to fetch|NetworkError/i.test(msg)) {
+                return 'Worker 脚本或其依赖加载失败';
+            }
+            if (/SyntaxError|ReferenceError|TypeError/i.test(msg)) {
+                return 'Worker 运行期异常';
+            }
+            return msg || 'Worker 未在预期时间内响应';
+        };
 
         const giveUp = (reason, type) => {
             if (failed || gotProgress) return;
@@ -1337,15 +1597,20 @@
             if (OptState.fallbackTimer) clearTimeout(OptState.fallbackTimer);
             try { worker.terminate(); } catch (e) { /* ignore */ }
             OptState.worker = null;
-            optLog(reason + '，已回退到主线程分片计算', type || 'warn');
+            optLog('Web Worker 不可用：' + reason, type || 'warn');
+            optLog('已回退到主线程分片计算 —— ⚠ 性能可能下降，页面仍保持响应', 'warn');
             startWithMainThread(config, ctx);
         };
 
         // 兜底：若 Worker 长时间无响应（file:// 环境常见），自动回退
-        OptState.fallbackTimer = setTimeout(() => giveUp('Worker 未在预期时间内响应'), 4000);
+        OptState.fallbackTimer = setTimeout(() => giveUp(diagnose(null)), 4000);
 
         worker.onerror = (e) => {
-            giveUp('Web Worker 启动失败（' + ((e && e.message) || '脚本加载被浏览器安全策略拦截') + '）', 'error');
+            giveUp(diagnose(e), 'error');
+        };
+
+        worker.onmessageerror = () => {
+            giveUp('Worker 消息反序列化失败（数据结构不可结构化克隆）', 'error');
         };
 
         worker.onmessage = (e) => {
@@ -1378,7 +1643,12 @@
             }
         };
 
-        // 注意：不使用 transfer，避免回退时源数组被 detach
+        // 数据传输策略（任务书 §15）：
+        //   经评估**不使用 Transferable**。原因：一旦 transfer，pvData/windData 的
+        //   ArrayBuffer 会被 detach，用户「取消优化」后主线程原始数据即不可用，
+        //   且无法二次发起优化。8760 × 8 字节 × 2 ≈ 140 KB，结构化克隆的开销可忽略，
+        //   不值得为它牺牲数据可用性。
+        //   若未来数据规模显著增大，应改为「主线程持有不可变副本 + 传输副本」的方案。
         worker.postMessage({
             type: 'start',
             payload: {
@@ -1395,10 +1665,16 @@
         });
     }
 
-    /** 路径 B：主线程分片调度（每代让出事件循环，保证页面不卡死） */
+    /**
+     * 路径 B：主线程分片调度（仅在 Worker 不可用时使用）。
+     *
+     * 任务书 §16：时间片由 60ms 降至 12ms —— 单次长任务会阻塞输入与滚动，
+     * 更短的时间片能让 UI 在每代之间获得调度机会，保持基本响应。
+     */
     function startWithMainThread(config, ctx) {
         OptState.mode = 'main';
-        optEl('optEngineMode').textContent = '计算模式：主线程分片调度（页面保持响应）';
+        optEl('optEngineMode').textContent = '计算模式：主线程 Fallback ⚠ 性能可能下降';
+        optEl('optEngineMode').style.color = 'var(--accent-yellow, #e3b341)';
 
         let session;
         try {
@@ -1414,7 +1690,8 @@
         }
         OptState.session = session;
 
-        const CHUNK_MS = 60;
+        const CHUNK_MS = 12;          // 任务书 §16：10~15ms
+        const perf = { startedAt: Date.now(), initMs: 0, generationCount: 0, generationTimeMs: 0 };
 
         const tick = () => {
             if (OptState.cancelled) {
@@ -1425,7 +1702,10 @@
                 const t0 = performance.now();
                 do {
                     if (session.isFinished()) break;
+                    const g0 = performance.now();
                     session.runNextGeneration();
+                    perf.generationTimeMs += performance.now() - g0;
+                    perf.generationCount++;
                 } while (!session.isFinished() && (performance.now() - t0) < CHUNK_MS);
             } catch (err) {
                 onOptimizationError(err);
@@ -1433,7 +1713,7 @@
             }
 
             if (session.isFinished()) {
-                onOptimizationFinished(session.getResult());
+                onOptimizationFinished(attachMainThreadPerf(session.getResult(), perf));
             } else {
                 setTimeout(tick, 0);   // 让出主线程 → UI 保持响应
             }
@@ -1443,14 +1723,43 @@
         setTimeout(() => {
             if (OptState.cancelled) { onOptimizationCancelled(); return; }
             try {
+                const initT0 = Date.now();
                 session.ensureInitialized();
+                perf.initMs = Date.now() - initT0;
             } catch (err) {
                 onOptimizationError(err);
                 return;
             }
-            if (session.isFinished()) onOptimizationFinished(session.getResult());
+            if (session.isFinished()) {
+                onOptimizationFinished(attachMainThreadPerf(session.getResult(), perf));
+            }
             else setTimeout(tick, 0);
-        }, 60);
+        }, 30);
+    }
+
+    /** 为主线程 Fallback 的结果补充同一结构的性能统计（任务书 §14） */
+    function attachMainThreadPerf(result, perf) {
+        if (!result) return result;
+        const st = result.statistics || {};
+        const evaluated = st.totalEvaluated || 0;
+        const cacheHits = st.cacheHits || 0;
+        const total = evaluated + cacheHits;
+        const totalMs = Date.now() - perf.startedAt;
+        result.performanceStats = {
+            mode: 'main',
+            initMs: perf.initMs,
+            totalMs: totalMs,
+            totalSeconds: Math.round(totalMs / 100) / 10,
+            generationsCompleted: st.generationsCompleted || perf.generationCount,
+            avgGenerationMs: perf.generationCount > 0 ? Math.round(perf.generationTimeMs / perf.generationCount) : 0,
+            totalEvaluated: evaluated,
+            cacheHits: cacheHits,
+            cacheHitRate: total > 0 ? Math.round((cacheHits / total) * 1000) / 10 : 0,
+            avgEvaluateMs: 0,
+            avgSimulateMs: 0,
+            storesHourlyResults: false,
+        };
+        return result;
     }
 
     function stopOptimization() {
@@ -1553,6 +1862,18 @@
 
         if (!result.success) {
             optLog('当前约束条件下没有找到可行方案，请放宽约束或扩大容量搜索范围', 'warn');
+        }
+
+        // 性能诊断（任务书 §14）：优化完成后统一汇报，便于持续优化
+        const pf = result.performanceStats;
+        if (pf) {
+            optLog(`性能诊断：模式=${pf.mode === 'worker' ? 'Web Worker' : '主线程 Fallback'}` +
+                   `，初始化 ${optNum(pf.initMs, 0)} ms，总耗时 ${optNum(pf.totalSeconds, 1)} s` +
+                   `，平均每代 ${optNum(pf.avgGenerationMs, 0)} ms`, 'info');
+            optLog(`性能诊断：评价方案 ${pf.totalEvaluated} 个，缓存命中 ${pf.cacheHits} 次（命中率 ${optNum(pf.cacheHitRate, 1)}%）` +
+                   (pf.avgEvaluateMs ? `，平均单方案评价 ${optNum(pf.avgEvaluateMs, 2)} ms` +
+                    `（其中 8760 仿真 ${optNum(pf.avgSimulateMs, 2)} ms）` : ''), 'info');
+            optLog('内存审计：优化结果只保存技术/经济指标与方案参数，不保存 8760 小时逐时结果（§11）', 'info');
         }
 
         renderOptimizationResult();
@@ -2278,14 +2599,23 @@
         initFinance();
         initOptimization();
         initBatch();
+        initSimTableControls();
 
         document.getElementById('btnClearLog').addEventListener('click', clearLog);
 
-        log('多能互补风光储氢分析软件 WEB-V2.2 已就绪（参数体系统一 + NSGA-II 多目标容量优化）', 'success');
-        log('V2.2 参数体系：一个参数、一个定义、一个数据源、一个传递路径');
-        log('　· 当前方案（风电/光伏/储能功率/储能时长/电解槽）唯一定义在「电量计算」页，优化页的基准方案直接读取它');
-        log('　· 优化范围与工程约束只用于搜索，不参与单方案计算，也不会改变当前方案');
-        log('　· 多组容量组合的批量扫描已独立为「批量计算」页');
+        // 测试钩子：仅供 tests/*.js 驱动内部行为（非业务接口）
+        window.__wbTestHooks = {
+            log: log,
+            clearLog: clearLog,
+            /** 仅供测试：注入仿真结果并刷新方案选择器（绕开文件读取，便于度量渲染耗时） */
+            __injectSimulationResults: (results) => onSimulationComplete(results),
+        };
+
+        log('多能互补风光储氢分析软件 WEB-V2.3 已就绪（前端性能与数据流优化）', 'success');
+        log('V2.3 架构：计算层（Float64Array）→ 结果层（ResultDataStore）→ 显示层（图表/表格/Excel 按需读取）');
+        log('　· 8760 小时数据只计算并保存一份；逐时表采用虚拟滚动，DOM 只保留可视区间');
+        log('　· 图表显示数据允许降采样（≤1500 点），指标计算始终使用全分辨率');
+        log('　· 优化阶段只保存指标，不保存 8760 逐时结果；复核时按需重算');
         log('请先选择 input.xlsx 文件，然后配置参数并运行仿真计算');
 
         // 检查依赖库

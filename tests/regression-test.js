@@ -65,6 +65,7 @@ global.XLSX = XLSX;
 const MODULES = [
     'js/utils.js',
     'js/parameter-manager.js',
+    'js/result-data-store.js',
     'js/simulation-engine.js',
     'js/data-summary.js',
     'js/estimate.js',
@@ -346,6 +347,147 @@ section('0.5 V2.2 参数体系（单一数据源 / 派生量 / 标识 / 兼容�
 
     // ---- 0.5.12 恢复默认，避免影响后续章节 ----
     ParameterManager.setCurrentScheme({ windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 });
+})();
+
+
+// ---------------------------------------------------------------------------
+// 1.5 V2.3 结果数据层（§4 / §5 / §8 / §18 / §19）
+// ---------------------------------------------------------------------------
+section('1.5 V2.3 结果数据层（ResultDataStore / 视图 / 降采样 / 缓存）');
+
+(function () {
+    const DS = global.ResultDataStore;
+    if (!DS) { fail('ResultDataStore 未加载'); return; }
+    ok('ResultDataStore 已加载');
+
+    // 用一个确定的 scheme 跑一次仿真，作为被测数据
+    const sc = { windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 };
+    const sim = runSingleSimulation(pvData, windData, sc, SIM_CONFIG_BASE);
+    const rec = DS.create(sim.results, sim.scheme, { systemVars: sim.systemVars, sums: sim.sums });
+
+    // ---- 1.5.1 零拷贝：results 必须是同一份 Float64Array ----
+    assertTrue('结果记录直接引用原始 Float64Array（零拷贝，§4）', rec.results === sim.results);
+    assertTrue('长度 = 8760', DS.getLength(rec) === 8760, String(DS.getLength(rec)));
+
+    // ---- 1.5.2 getValue 与直接索引一致（全量比对） ----
+    let maxDiff = 0;
+    for (let h = 0; h < 8760; h++) {
+        for (let c = 0; c < DS.COL_COUNT; c++) {
+            const a = DS.getValue(rec, h, c);
+            const b = sim.results[h * DS.COL_COUNT + c];
+            if (a !== b) maxDiff = Math.max(maxDiff, Math.abs(a - b));
+        }
+    }
+    assertTrue('getValue 与直接索引全量一致（8760 × 11 = 96360 个值）', maxDiff === 0, '最大差异 ' + maxDiff);
+
+    // ---- 1.5.3 视图 map 与「旧 parseResults 算法」等价（显示层不丢数据） ----
+    // 内联复刻 V2.2 parseResults 的算法（回归测试不加载 chart-module.js）
+    const legacyParse = (raw) => {
+        const keys = ['光伏电量', '风电电量', '合计电量', '储能充电量', '储能放电量',
+                      '储能现存容量', '制氢电量', '上网电量', '下网电量', '弃电量', '制氢量'];
+        const rows = [];
+        for (let h = 0; h < raw.length / 11; h++) {
+            const row = {};
+            for (let c = 0; c < 11; c++) row[keys[c]] = raw[h * 11 + c];
+            rows.push(row);
+        }
+        return rows;
+    };
+    const view = DS.ChartDataAdapter.getFullView(rec);
+    const legacy = legacyParse(sim.results);
+    let viewDiff = 0;
+    for (let c = 0; c < DS.COL_COUNT; c++) {
+        const label = DS.COL_LABELS[c];
+        const viaView = view.map(d => d[label]);
+        for (let h = 0; h < 8760; h++) {
+            const a = viaView[h];
+            const b = legacy[h][label];
+            if (a !== b) viewDiff = Math.max(viewDiff, Math.abs(a - b));
+        }
+    }
+    assertTrue('HourView 与旧 parseResults 的取值完全等价（96360 个值）', viewDiff === 0, '最大差异 ' + viewDiff);
+
+    // ---- 1.5.4 月度摘要与暴力逐月求和一致（§18：缓存不引入口径偏差） ----
+    const monthly = DS.getMonthlySummary(rec);
+    const cum = DS.monthCumulativeHours();
+    let monthDiff = 0;
+    for (let m = 0; m < 12; m++) {
+        for (let c = 0; c < DS.COL_COUNT; c++) {
+            if (c === DS.COLS.storage) continue;    // 存量列取末值，另行校验
+            let s = 0;
+            for (let h = cum[m]; h < cum[m + 1]; h++) s += sim.results[h * DS.COL_COUNT + c];
+            monthDiff = Math.max(monthDiff, Math.abs(monthly[m].colSum[c] - s));
+        }
+    }
+    assertTrue('月度摘要（缓存）与逐月暴力求和完全一致（12 × 11 项）', monthDiff === 0, '最大差异 ' + monthDiff);
+    let storageOk = true;
+    for (let m = 0; m < 12; m++) {
+        const lastH = Math.min(cum[m + 1], 8760) - 1;
+        if (monthly[m].lastStorage !== sim.results[lastH * DS.COL_COUNT + DS.COLS.storage]) storageOk = false;
+    }
+    assertTrue('月度储能现存容量取「月末值」（存量列不做求和）', storageOk);
+
+    // ---- 1.5.5 降采样：点数受控 + 极值保留 + 升序 + 明确标注仅供显示（§8） ----
+    const col = DS.getColumn(rec, 'pv');
+    const ds = DS.downsampleIndices(col, 1500);
+    assertTrue('降采样点数 ≤ maxPoints', ds.points <= 1500, '8760 → ' + ds.points + ' 点');
+    if (ds.downsampled) {
+        let gMax = -Infinity, gMin = Infinity;
+        for (let i = 0; i < col.length; i++) {
+            if (col[i] > gMax) gMax = col[i];
+            if (col[i] < gMin) gMin = col[i];
+        }
+        let hasMax = false, hasMin = false;
+        for (let i = 0; i < ds.indices.length; i++) {
+            if (col[ds.indices[i]] === gMax) hasMax = true;
+            if (col[ds.indices[i]] === gMin) hasMin = true;
+        }
+        assertTrue('降采样保留全局最大值（尖峰不丢失）', hasMax);
+        assertTrue('降采样保留全局最小值（谷值不丢失）', hasMin);
+        let sorted = true;
+        for (let i = 1; i < ds.indices.length; i++) {
+            if (ds.indices[i] <= ds.indices[i - 1]) sorted = false;
+        }
+        assertTrue('降采样索引按时间升序', sorted);
+    }
+    const hv = DS.ChartDataAdapter.getHourlyView(rec, 'pv', 1500);
+    assertTrue('HourView 标记 downsampled / originalPoints（提示仅供显示）',
+        hv.downsampled === true && hv.originalPoints === 8760 && hv.length <= 1500,
+        hv.originalPoints + ' → ' + hv.length);
+
+    // ---- 1.5.6 缓存命中（§9 / §19） ----
+    DS.ChartDataCache.clear();
+    DS.ChartDataAdapter.getHourlyView(rec, 'wind', 1500);
+    const beforeMiss = DS.ChartDataCache.stats.misses;
+    DS.ChartDataAdapter.getHourlyView(rec, 'wind', 1500);
+    const afterHit = DS.ChartDataCache.stats.hits;
+    assertTrue('相同 (schemeKey+chartType+column+maxPoints) 第二次读取命中缓存',
+        afterHit > 0 && DS.ChartDataCache.stats.misses === beforeMiss);
+
+    // ---- 1.5.7 优化缓存剥离 8760 原始结果（§11） ----
+    const ev = OptimizationEngine.evaluateScheme(sc, makeContext());
+    const stripped = DS.OptimizationResultCache.strip(ev);
+    assertTrue('OptimizationResultCache.strip 移除 8760 原始结果',
+        !('results' in stripped) && !!stripped.technical && !!stripped.economic);
+    assertTrue('剥离后仍保留指标与方案参数',
+        !!stripped.scheme && typeof stripped.technical.curtailmentRate === 'number');
+
+    // ---- 1.5.8 年度摘要与 sim.sums 一致（§18：单一真值） ----
+    const annual = DS.getAnnualSummary(rec);
+    const sums = sim.sums;
+    const pairs = [
+        ['合计电量', sums.sumTotal], ['制氢电量', sums.sumHydrogenPower],
+        ['上网电量', sums.sumExport], ['下网电量', sums.sumImport],
+        ['弃电量', sums.sumCurtailment], ['制氢量', sums.sumH2Prod],
+    ];
+    let annualDiff = 0;
+    for (const [label, v] of pairs) annualDiff = Math.max(annualDiff, Math.abs(annual.byLabel[label] - v));
+    assertTrue('年度摘要与仿真内置 sums 完全一致', annualDiff === 0, '最大差异 ' + annualDiff);
+
+    // ---- 1.5.9 物化接口仅用于导出场景（§5） ----
+    const objs = DS.materialize(rec);
+    assertTrue('materialize 返回 8760 行对象（供 Excel 导出）',
+        objs.length === 8760 && typeof objs[0]['光伏电量'] === 'number');
 })();
 
 

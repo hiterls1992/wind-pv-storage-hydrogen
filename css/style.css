@@ -1258,3 +1258,92 @@ input.input-readonly,
 @media (max-width: 1200px) {
     .batch-var-head, .batch-var-row { grid-template-columns: 80px 1fr 1fr 1fr 30px; }
 }
+
+/* ============================================================================
+ * V2.3 前端性能与数据流优化 —— 新增样式
+ * ============================================================================ */
+
+/* ---- 逐时表虚拟滚动（任务书 §6 / §7）----
+   数据仍是完整 8760 小时，DOM 只保留可视区间（约 50~120 行）*/
+.vt-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.vt-label { color: var(--text-muted); }
+
+.vt-current {
+    font-family: var(--font-mono);
+    color: var(--accent-cyan);
+    min-width: 42px;
+    display: inline-block;
+    text-align: center;
+}
+
+.vt-jump {
+    width: 92px;
+    padding: 3px 6px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    outline: none;
+}
+
+.vt-jump:focus { border-color: var(--accent-cyan); }
+
+.vt-range {
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.vt-container {
+    position: relative;
+    overflow: auto;
+    will-change: scroll-position;
+}
+
+/* 固定布局 + 显式列宽：列宽稳定，且首帧渲染更快 */
+.vt-table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+.vt-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg-secondary);
+}
+
+.vt-table tfoot td {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    background: var(--bg-secondary);
+    border-top: 2px solid var(--border-color);
+}
+
+/* 占位行：只负责撑起高度，不参与对齐与绘制 */
+.vt-table tr.vt-spacer td {
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    line-height: 0;
+}
+
+/* 性能说明角标 */
+.vt-note {
+    padding: 4px 12px 8px;
+    font-size: 10px;
+    color: var(--text-muted);
+}

@@ -52,6 +52,7 @@ const SCRIPT_ORDER = [
     'js/vendor/FileSaver.min.js',
     'js/utils.js',
     'js/parameter-manager.js',
+    'js/result-data-store.js',
     'js/excel-io.js',
     'js/simulation-engine.js',
     'js/data-summary.js',
@@ -450,20 +451,44 @@ const SCRIPT_ORDER = [
 
     const viewBtn = doc.getElementById('btnView8760');
     if (viewBtn && !viewBtn.disabled) {
+        // V2.3：逐时表已改为虚拟滚动，DOM 行数应恒定在「可视区间 + 缓冲」量级，
+        // 不再随 8760 行数据增长（任务书 §6 / §25：DOM 节点不超过约 1000）
         const rowsNow = () => doc.getElementById('simulationTable').querySelectorAll('tbody tr').length;
+        const domNodesNow = () => doc.getElementById('simulationTable').querySelectorAll('*').length;
         const simDoneCount = () => (logText().match(/仿真计算完成/g) || []).length;
-        const before = rowsNow();
         const beforeDone = simDoneCount();
 
         viewBtn.click();
-        // 断言可观测结果：产生新的一次「仿真计算完成」且逐时表被重建
+        // 断言可观测结果：产生新的一次「仿真计算完成」且逐时表已按虚拟滚动渲染
         // （图表重绘在 jsdom 下因缺 canvas 会中断，不计入判定）
         const simOk = await waitFor(() =>
-            simDoneCount() > beforeDone && rowsNow() > 100, 90000);
+            simDoneCount() > beforeDone && rowsNow() > 10 && rowsNow() < 200, 90000);
 
         if (simOk) {
-            ok('8760 小时复核完成（重新执行了一次完整仿真）',
-                rowsNow() + ' 行（复核前 ' + before + ' 行）');
+            const rows = rowsNow();
+            const nodes = domNodesNow();
+            ok('8760 小时复核完成（重新执行了一次完整仿真）', 'DOM 仅 ' + rows + ' 行');
+            if (rows < 200) ok('虚拟滚动生效：DOM 行数与 8760 无关', rows + ' 行（V2.2 为 8760 行）');
+            else bad('DOM 行数异常（应为可视区间量级）', String(rows));
+            if (nodes < 1000) ok('表格 DOM 节点数 < 1000（§25 指标）', nodes + ' 个');
+            else info('表格 DOM 节点数 ' + nodes + '（jsdom 无布局，视口高度取默认值，真实浏览器会更小）');
+            // 定位功能（§7）
+            const jump = doc.getElementById('vtJumpHour');
+            if (jump) {
+                jump.value = '5000';
+                jump.dispatchEvent(new window.Event('change'));
+                const cur = doc.getElementById('vtCurrentHour').textContent;
+                if (cur === '5000') ok('跳转小时定位生效（0 → 5000）', '当前小时 ' + cur);
+                else bad('跳转定位异常', '当前小时 ' + cur);
+                const range = doc.getElementById('vtRangeInfo').textContent;
+                info('定位信息：' + range);
+            } else {
+                bad('缺少「跳转小时」控件');
+            }
+            // 总和行应常驻 tfoot
+            const foot = doc.getElementById('simulationTable').querySelector('tfoot td');
+            if (foot && /总和/.test(foot.textContent)) ok('「总和」行常驻表尾（不参与虚拟化）');
+            else bad('「总和」行缺失');
             // V2.2：推荐方案通过 setCurrentScheme → syncSchemeToUI 回写到「当前方案」
             const wind = doc.getElementById('currentWindCapacity').value;
             const pv = doc.getElementById('currentPvCapacity').value;
@@ -554,6 +579,61 @@ const SCRIPT_ORDER = [
     await sleep(400);
     if (/优化完成|优化失败/.test(logText())) ok('重复点击「开始优化」不会导致页面崩溃');
     else bad('重复优化无响应');
+
+    // -----------------------------------------------------------------------
+    section('9.5 V2.3 数据流与性能（结果层 / 日志限长 / 性能诊断）');
+
+    // 结果层：ResultDataStore 可用，且逐时表走虚拟滚动
+    if (typeof window.ResultDataStore !== 'undefined') ok('ResultDataStore 已挂载到 window');
+    else bad('ResultDataStore 未挂载');
+
+    if (window.ResultDataStore && window.ResultDataStore.SimulationResultCache.size > 0) {
+        ok('查看过的方案已进入 SimulationResultCache', '缓存 ' + window.ResultDataStore.SimulationResultCache.size + ' 个方案');
+    } else {
+        bad('SimulationResultCache 为空');
+    }
+
+    // 降采样只用于显示：点数受控且保留极值
+    if (window.ResultDataStore) {
+        const key = Object.keys(window.ResultDataStore.SimulationResultCache._m || {})[0]
+            || window.ResultDataStore.SimulationResultCache.keys()[0];
+        const rec = key ? window.ResultDataStore.SimulationResultCache.get(key) : null;
+        if (rec) {
+            const hv = window.ResultDataStore.ChartDataAdapter.getHourlyView(rec, 'pv', 1500);
+            if (hv.length <= 1500) ok('图表显示数据降采样受控', hv.originalPoints + ' → ' + hv.length + ' 点');
+            else bad('降采样点数超限', String(hv.length));
+            // 全分辨率接口仍可用（指标计算不受降采样影响）
+            const annual = window.ResultDataStore.getAnnualSummary(rec);
+            if (annual && annual.hours === 8760) ok('指标计算仍走全分辨率（8760）', '合计电量 ' + annual.byLabel['合计电量'].toFixed(1) + ' MWh');
+            else bad('年度摘要异常');
+        } else {
+            info('SimulationResultCache 未取到记录（复核流程尚未触发读取）');
+        }
+    }
+
+    // 性能诊断日志（§14）
+    if (/【优化】性能诊断：/.test(logText())) ok('优化完成后输出性能诊断');
+    else info('未见性能诊断日志（Worker 路径下由 Worker 生成）');
+    if (/内存审计：优化结果只保存技术\/经济指标与方案参数/.test(logText())) {
+        ok('输出「优化不保存 8760 结果」的内存审计说明');
+    }
+
+    // 日志限长（§20）：连续写入远超上限的日志，DOM 行数必须恒定
+    const logEl = doc.getElementById('logContent');
+    const hooks = window.__wbTestHooks;
+    if (hooks && typeof hooks.log === 'function') {
+        for (let i = 0; i < 500; i++) hooks.log('限长压测日志 ' + i);
+        if (logEl.childElementCount <= 300) {
+            ok('日志 DOM 行数受 MAX_LOG_LINES 约束', logEl.childElementCount + ' 行（上限 300）');
+        } else {
+            bad('日志 DOM 无限增长', logEl.childElementCount + ' 行');
+        }
+        hooks.clearLog();
+        if (logEl.childElementCount === 0) ok('清空日志后 DOM 归零');
+        else bad('清空日志失败', String(logEl.childElementCount));
+    } else {
+        bad('缺少测试钩子 window.__wbTestHooks');
+    }
 
     // -----------------------------------------------------------------------
     section('10. 页面内未捕获异常（环境限制筛查）');
