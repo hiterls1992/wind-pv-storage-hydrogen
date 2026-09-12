@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多能互补系统仿真计算平台</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- 顶部标题栏 -->
+    <header class="header">
+        <div class="header-left">
+            <span class="logo">⚡</span>
+            <h1>多能互补系统仿真计算平台</h1>
+            <span class="version">WEB-V2.1</span>
+            <span style="font-size:11px;color:#5a6a8a;letter-spacing:0;margin-left:6px">作者：hiterls1992</span>
+        </div>
+        <div class="header-right">
+            <span class="status-dot" id="workerStatus" title="计算引擎状态"></span>
+            <span class="status-text" id="workerStatusText">就绪</span>
+        </div>
+    </header>
+
+    <!-- 主标签页导航 -->
+    <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="simulation">⚡ 电量计算</button>
+        <button class="tab-btn" data-tab="estimate">💰 概算分析</button>
+        <button class="tab-btn" data-tab="finance">📊 经济评价</button>
+        <button class="tab-btn" data-tab="optimization">🎯 方案优化</button>
+    </nav>
+
+    <!-- 主内容区域 -->
+    <main class="main-content">
+
+        <!-- ==================== 电量计算模块 ==================== -->
+        <section class="tab-panel active" id="tab-simulation">
+            <div class="panel-layout">
+                <!-- 左侧参数面板 -->
+                <aside class="param-panel">
+                    <div class="param-section">
+                        <h3>📁 数据文件</h3>
+                        <div class="file-upload-group">
+                            <input type="file" id="inputFile" accept=".xlsx" class="file-input">
+                            <label for="inputFile" class="file-label">
+                                <span class="file-icon">📂</span>
+                                <span id="inputFileName">点击选择 input.xlsx</span>
+                            </label>
+                        </div>
+                        <div class="file-info" id="fileInfo"></div>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>🔧 扫描参数范围</h3>
+                        <div class="param-grid">
+                            <div class="param-group">
+                                <label>储能功率 (MW)</label>
+                                <div class="range-inputs">
+                                    <input type="number" id="storagePowerMin" value="100" step="10">
+                                    <span>~</span>
+                                    <input type="number" id="storagePowerMax" value="100" step="10">
+                                    <span>步长</span>
+                                    <input type="number" id="storagePowerStep" value="0" step="10" style="width:60px">
+                                </div>
+                            </div>
+                            <div class="param-group">
+                                <label>储能时长 (小时)</label>
+                                <div class="range-inputs">
+                                    <input type="number" id="storageDurationMin" value="2" step="1">
+                                    <span>~</span>
+                                    <input type="number" id="storageDurationMax" value="2" step="1">
+                                    <span>步长</span>
+                                    <input type="number" id="storageDurationStep" value="0" step="1" style="width:60px">
+                                </div>
+                            </div>
+                            <div class="param-group">
+                                <label>电解槽容量 (MW)</label>
+                                <div class="range-inputs">
+                                    <input type="number" id="electrolyzerMin" value="160" step="10">
+                                    <span>~</span>
+                                    <input type="number" id="electrolyzerMax" value="160" step="10">
+                                    <span>步长</span>
+                                    <input type="number" id="electrolyzerStep" value="0" step="10" style="width:60px">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>⚙️ 系统参数</h3>
+                        <div class="param-grid">
+                            <div class="param-row">
+                                <label>光伏容量 (MW)</label>
+                                <input type="number" id="pvCapacity" value="360" step="10">
+                            </div>
+                            <div class="param-row">
+                                <label>风电容量 (MW)</label>
+                                <input type="number" id="windCapacity" value="200" step="10">
+                            </div>
+                            <div class="param-row">
+                                <label>电解槽最低运行比例</label>
+                                <input type="number" id="electrolyzerMinRatio" value="0.3" step="0.05">
+                            </div>
+                            <div class="param-row">
+                                <label>每小时上网比例上限</label>
+                                <input type="number" id="maxExportHourly" value="0.0" step="0.05">
+                            </div>
+                            <div class="param-row">
+                                <label>总量上网比例上限</label>
+                                <input type="number" id="maxExportTotal" value="0.0" step="0.05">
+                            </div>
+                            <div class="param-row">
+                                <label>下网电量比例上限</label>
+                                <input type="number" id="maxImportRatio" value="0.15" step="0.05">
+                            </div>
+                            <div class="param-row">
+                                <label>储能充电效率</label>
+                                <input type="number" id="chargeEfficiency" value="0.92" step="0.01">
+                            </div>
+                            <div class="param-row">
+                                <label>储能放电效率</label>
+                                <input type="number" id="dischargeEfficiency" value="0.92" step="0.01">
+                            </div>
+                            <div class="param-row">
+                                <label>制氢电耗 (kWh/kg)</label>
+                                <input type="number" id="hydrogenConsumption" value="55" step="1">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="param-actions">
+                        <button class="btn btn-primary btn-lg" id="btnRunSimulation">
+                            <span class="btn-icon">▶</span> 开始仿真计算
+                        </button>
+                        <button class="btn btn-secondary" id="btnCancelSimulation" style="display:none">
+                            <span class="btn-icon">⏹</span> 取消计算
+                        </button>
+                    </div>
+                </aside>
+
+                <!-- 右侧结果区域 -->
+                <div class="result-panel">
+                    <!-- 进度条 -->
+                    <div class="progress-bar-container" id="progressContainer" style="display:none">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progressFill" style="width:0%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="progressText">准备中...</span>
+                            <span id="progressPercent">0%</span>
+                        </div>
+                    </div>
+
+                    <!-- 子标签页 -->
+                    <div class="sub-tabs">
+                        <button class="sub-tab-btn active" data-subtab="sim-table">📊 数据表格</button>
+                        <button class="sub-tab-btn" data-subtab="sim-charts">📈 图表分析</button>
+                        <button class="sub-tab-btn" data-subtab="sim-summary">📋 方案汇总</button>
+                    </div>
+
+                    <!-- 数据表格 -->
+                    <div class="sub-tab-panel active" id="subtab-sim-table">
+                        <div class="table-controls">
+                            <select id="schemeSelect" class="scheme-select">
+                                <option value="">-- 请先运行仿真 --</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" id="btnExportExcel" disabled>📥 导出Excel</button>
+                            <button class="btn btn-sm btn-outline" id="btnExportAllExcel" disabled>📥 批量导出</button>
+                        </div>
+                        <div class="table-container">
+                            <table class="data-table" id="simulationTable">
+                                <thead><tr><th colspan="10">请先运行仿真计算</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 图表分析 -->
+                    <div class="sub-tab-panel" id="subtab-sim-charts">
+                        <div class="chart-controls">
+                            <select id="chartSchemeSelect" class="scheme-select">
+                                <option value="">-- 请先运行仿真 --</option>
+                            </select>
+                            <select id="chartTypeSelect" class="scheme-select">
+                                <option value="overview">全年能量流动汇总</option>
+                                <option value="hourly">逐时曲线</option>
+                                <option value="monthly">逐月柱状图（9项汇总）</option>
+                                <option value="monthly-overview">逐月电量汇总图</option>
+                                <option value="monthly-detail">单月电量汇总图（选月份）</option>
+                                <option value="module-monthly">分模块逐月柱状图（选列）</option>
+                                <option value="typical-day">典型日曲线</option>
+                                <option value="typical-week">典型周曲线</option>
+                            </select>
+                            <select id="chartColumnSelect" class="scheme-select" style="display:none">
+                                <option value="pv">光伏电量</option>
+                                <option value="wind">风电电量</option>
+                                <option value="total">合计电量</option>
+                                <option value="charge">储能充电量</option>
+                                <option value="discharge">储能放电量</option>
+                                <option value="storage">储能现存容量</option>
+                                <option value="hydrogen">制氢电量</option>
+                                <option value="export">上网电量</option>
+                                <option value="import">下网电量</option>
+                                <option value="curtailment">弃电量</option>
+                                <option value="h2prod">制氢量(吨)</option>
+                            </select>
+                            <select id="chartMonthSelect" class="scheme-select" style="display:none">
+                                <option value="0">1月</option>
+                                <option value="1">2月</option>
+                                <option value="2">3月</option>
+                                <option value="3">4月</option>
+                                <option value="4">5月</option>
+                                <option value="5">6月</option>
+                                <option value="6">7月</option>
+                                <option value="7">8月</option>
+                                <option value="8">9月</option>
+                                <option value="9">10月</option>
+                                <option value="10">11月</option>
+                                <option value="11">12月</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" id="btnExportChartPng" disabled>📷 导出当前图PNG</button>
+                            <button class="btn btn-sm btn-outline" id="btnExportAllCharts" disabled>📷 导出本方案全部图表(ZIP)</button>
+                        </div>
+                        <div class="chart-container" id="chartContainer">
+                            <div class="chart-placeholder">运行仿真计算后，在此处查看交互式图表</div>
+                        </div>
+                    </div>
+
+                    <!-- 方案汇总 -->
+                    <div class="sub-tab-panel" id="subtab-sim-summary">
+                        <div class="table-controls">
+                            <button class="btn btn-sm btn-outline" id="btnGenSummary" disabled>📋 生成汇总</button>
+                            <button class="btn btn-sm btn-outline" id="btnExportSummary" disabled>📥 导出汇总Excel</button>
+                        </div>
+                        <div class="table-container">
+                            <table class="data-table" id="summaryTable">
+                                <thead><tr><th colspan="16">请先运行仿真计算并生成汇总</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==================== 概算分析模块 ==================== -->
+        <section class="tab-panel" id="tab-estimate">
+            <div class="panel-layout">
+                <aside class="param-panel">
+                    <div class="param-section">
+                        <h3>📁 数据文件</h3>
+                        <div class="file-upload-group">
+                            <input type="file" id="estimateDataFile" accept=".xlsx" class="file-input">
+                            <label for="estimateDataFile" class="file-label">
+                                <span class="file-icon">📂</span>
+                                <span id="estimateDataFileName">选择数据汇总文件</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="param-section">
+                        <h3>💰 设备单价</h3>
+                        <div class="param-grid">
+                            <div class="param-row">
+                                <label>风电单价 (元/kW)</label>
+                                <input type="number" id="windUnitPrice" value="3800">
+                            </div>
+                            <div class="param-row">
+                                <label>光伏单价 (元/kW)</label>
+                                <input type="number" id="pvUnitPrice" value="2500">
+                            </div>
+                            <div class="param-row">
+                                <label>储能单价 (元/kWh)</label>
+                                <input type="number" id="storageUnitPrice" value="800">
+                            </div>
+                            <div class="param-row">
+                                <label>电解槽单价 (元/kW)</label>
+                                <input type="number" id="electrolyzerUnitPrice" value="1600">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="param-section">
+                        <h3>🏗️ 其他费用</h3>
+                        <div class="param-grid">
+                            <div class="param-row">
+                                <label>送出线路及升压站 (万元)</label>
+                                <input type="number" id="transmissionCost" value="10000">
+                            </div>
+                            <div class="param-row">
+                                <label>配套设施及土地 (万元)</label>
+                                <input type="number" id="landCost" value="10000">
+                            </div>
+                            <div class="param-row">
+                                <label>其他配套设施比例 (%)</label>
+                                <input type="number" id="otherFacilitiesRatio" value="70">
+                                <span class="hint">占电解槽总价比例</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="param-actions">
+                        <button class="btn btn-primary btn-lg" id="btnRunEstimate">
+                            <span class="btn-icon">▶</span> 执行概算分析
+                        </button>
+                    </div>
+                </aside>
+                <div class="result-panel">
+                    <div class="table-controls">
+                        <button class="btn btn-sm btn-outline" id="btnExportEstimate" disabled>📥 导出概算结果Excel</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="estimateTable">
+                            <thead><tr><th colspan="20">请先加载数据汇总文件并执行概算分析</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==================== 经济评价模块 ==================== -->
+        <section class="tab-panel" id="tab-finance">
+            <div class="panel-layout">
+                <aside class="param-panel finance-param-panel">
+                    <!-- 经评子标签 -->
+                    <div class="finance-sub-tabs">
+                        <button class="finance-sub-tab active" data-ftab="f-data">数据文件</button>
+                        <button class="finance-sub-tab" data-ftab="f-project">项目信息</button>
+                        <button class="finance-sub-tab" data-ftab="f-cost">成本费用</button>
+                        <button class="finance-sub-tab" data-ftab="f-revenue">收入税金</button>
+                    </div>
+
+                    <!-- 数据文件 -->
+                    <div class="finance-sub-panel active" id="ftab-f-data">
+                        <div class="file-upload-group">
+                            <input type="file" id="financeDataFile" accept=".xlsx" class="file-input">
+                            <label for="financeDataFile" class="file-label">
+                                <span class="file-icon">📂</span>
+                                <span id="financeDataFileName">选择概算结果文件（含运营+投资数据）</span>
+                            </label>
+                        </div>
+                        <div class="scheme-select-area" id="financeSchemeArea" style="display:none">
+                            <label>选择方案：</label>
+                            <select id="financeSchemeSelect" class="scheme-select"></select>
+                        </div>
+                        <div class="param-actions" style="margin-top:12px">
+                            <button class="btn btn-primary" id="btnLoadFinance" disabled>📋 加载方案</button>
+                            <button class="btn btn-primary" id="btnRunFinance" disabled>📊 分析当前方案</button>
+                            <button class="btn btn-secondary" id="btnBatchFinance" disabled>📊 批量分析</button>
+                        </div>
+                    </div>
+
+                    <!-- 项目信息 -->
+                    <div class="finance-sub-panel" id="ftab-f-project">
+                        <div class="param-section">
+                            <h3>📐 基本信息</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>计算期 (年)</label><input type="number" id="calcPeriod" value="22"></div>
+                                <div class="param-row"><label>建设期 (年)</label><input type="number" id="constructPeriod" value="2"></div>
+                                <div class="param-row"><label>装机批次</label><input type="number" id="batchCount" value="1"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>📊 基准收益率</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>资本金基准 (%)</label><input type="number" id="capitalBenchmark" value="8.0" step="0.5"></div>
+                                <div class="param-row"><label>行业基准-税前 (%)</label><input type="number" id="industryBenchmarkPre" value="5.0" step="0.5"></div>
+                                <div class="param-row"><label>行业基准-税后 (%)</label><input type="number" id="industryBenchmarkPost" value="4.5" step="0.5"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>🏦 融资参数</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>资本金比例 (%)</label><input type="number" id="capitalRatio" value="20" step="1"></div>
+                                <div class="param-row"><label>还款期 (年)</label><input type="number" id="loanPeriod" value="15"></div>
+                                <div class="param-row"><label>贷款利率 (%)</label><input type="number" id="longTermLoanRate" value="3.0" step="0.1"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 成本费用 -->
+                    <div class="finance-sub-panel" id="ftab-f-cost">
+                        <div class="param-section">
+                            <h3>🔋 电解槽参数</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>单台容量 (MW)</label><input type="number" id="singleElectrolyzer" value="5.0"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>⚡ 电费参数</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>容量电费 (元/kVA·月)</label><input type="number" id="capacityElecFee" value="20.0"></div>
+                                <div class="param-row"><label>上网电价 (元/kWh)</label><input type="number" id="ongridPrice" value="0.2" step="0.01"></div>
+                                <div class="param-row"><label>下网电价 (元/kWh)</label><input type="number" id="offgridPrice" value="0.7" step="0.01"></div>
+                                <div class="param-row"><label>过网费 (元/kWh)</label><input type="number" id="wheelingFee" value="0.12" step="0.01"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>🔧 制氢系统成本</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>人工 (万元/年/台)</label><input type="number" id="h2LaborCost" value="3.0"></div>
+                                <div class="param-row"><label>维护 (万元/年/台)</label><input type="number" id="electrolyzerMaint" value="40.0"></div>
+                                <div class="param-row"><label>大修-第10年 (万元/台)</label><input type="number" id="electrolyzerOverhaul" value="240.0"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>📦 其他成本</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>水费 (元/吨)</label><input type="number" id="waterUnitPrice" value="2.0"></div>
+                                <div class="param-row"><label>运维 (元/kW/年)</label><input type="number" id="windPvOm" value="35.0"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>📉 折旧</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>折旧年限 (年)</label><input type="number" id="depreciationYears" value="20"></div>
+                                <div class="param-row"><label>残值率 (%)</label><input type="number" id="residualRate" value="5.0"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 收入税金 -->
+                    <div class="finance-sub-panel" id="ftab-f-revenue">
+                        <div class="param-section">
+                            <h3>💵 收入参数</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>氢气售价 (元/kg)</label><input type="number" id="h2Price" value="30.0" step="1"></div>
+                                <div class="param-row"><label>销项税率 (%)</label><input type="number" id="outputVatRate" value="13.0"></div>
+                            </div>
+                        </div>
+                        <div class="param-section">
+                            <h3>🧾 税金参数</h3>
+                            <div class="param-grid">
+                                <div class="param-row"><label>企业所得税 (%)</label><input type="number" id="incomeTaxRate" value="25.0"></div>
+                                <div class="param-row"><label>税金附加综合税率 (%)</label><input type="number" id="surtaxRate" value="10.0"></div>
+                            </div>
+                        </div>
+                        <div class="param-section note-section">
+                            <p>📌 销售税金附加综合税率 = 城建税(5%) + 教育费附加(3%) + 地方教育附加(2%) = 10%</p>
+                            <p>📌 增值税 = 销项税额 - 进项税额（进项按经营成本50%估算）</p>
+                        </div>
+                    </div>
+                </aside>
+
+                <div class="result-panel">
+                    <div class="table-controls">
+                        <button class="btn btn-sm btn-outline" id="btnExportFinance" disabled>📥 导出经评结果Excel</button>
+                        <button class="btn btn-sm btn-outline" id="btnExportCashflow" disabled>📥 导出现金流量表</button>
+                        <button class="btn btn-sm btn-outline" id="btnExportBatchFinance" disabled>📥 导出批量结果Excel</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="financeTable">
+                            <thead><tr><th colspan="10">请先加载方案数据并执行经济评价</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <!-- ==================== 方案优化模块（V2.1 新增 · NSGA-II 多目标容量优化） ==================== -->
+        <section class="tab-panel" id="tab-optimization">
+            <div class="panel-layout">
+                <!-- 左侧：优化配置 -->
+                <aside class="param-panel opt-param-panel">
+                    <div class="param-section">
+                        <h3>① 优化变量（范围 + 步长）</h3>
+                        <div class="opt-var-grid">
+                            <div class="opt-var-head">
+                                <span>变量</span><span>最小</span><span>最大</span><span>步长</span><span>档位</span>
+                            </div>
+                            <div class="opt-var-row">
+                                <label>风电容量 (MW)</label>
+                                <input type="number" id="optWindMin" value="50" step="25">
+                                <input type="number" id="optWindMax" value="300" step="25">
+                                <input type="number" id="optWindStep" value="25" step="5">
+                                <span class="opt-levels" id="optWindLevels">—</span>
+                            </div>
+                            <div class="opt-var-row">
+                                <label>光伏容量 (MW)</label>
+                                <input type="number" id="optPvMin" value="50" step="25">
+                                <input type="number" id="optPvMax" value="500" step="25">
+                                <input type="number" id="optPvStep" value="25" step="5">
+                                <span class="opt-levels" id="optPvLevels">—</span>
+                            </div>
+                            <div class="opt-var-row">
+                                <label>储能功率 (MW)</label>
+                                <input type="number" id="optStoragePowerMin" value="0" step="25">
+                                <input type="number" id="optStoragePowerMax" value="200" step="25">
+                                <input type="number" id="optStoragePowerStep" value="25" step="5">
+                                <span class="opt-levels" id="optStoragePowerLevels">—</span>
+                            </div>
+                            <div class="opt-var-row">
+                                <label>储能时长 (h)</label>
+                                <input type="number" id="optStorageDurationMin" value="0" step="1">
+                                <input type="number" id="optStorageDurationMax" value="4" step="1">
+                                <input type="number" id="optStorageDurationStep" value="1" step="1">
+                                <span class="opt-levels" id="optStorageDurationLevels">—</span>
+                            </div>
+                            <div class="opt-var-row">
+                                <label>电解槽容量 (MW)</label>
+                                <input type="number" id="optElectrolyzerMin" value="25" step="25">
+                                <input type="number" id="optElectrolyzerMax" value="200" step="25">
+                                <input type="number" id="optElectrolyzerStep" value="25" step="5">
+                                <span class="opt-levels" id="optElectrolyzerLevels">—</span>
+                            </div>
+                        </div>
+                        <p class="hint">储能容量 = 储能功率 × 储能时长（MWh）；所有取值严格落在「最小 + k×步长」上。</p>
+                        <p class="hint" id="optSearchSpace">搜索空间：—</p>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>② 工程约束</h3>
+                        <div class="opt-cons-grid">
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consHydrogenOn" checked>
+                                <label for="consHydrogenOn">年制氢量 ≥</label>
+                                <input type="number" id="consHydrogen" value="1" step="0.5">
+                                <span>万吨/年</span>
+                            </div>
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consCurtailOn" checked>
+                                <label for="consCurtailOn">弃电率 ≤</label>
+                                <input type="number" id="consCurtail" value="10" step="1">
+                                <span>%</span>
+                            </div>
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consImportOn" checked>
+                                <label for="consImportOn">外购电比例 ≤</label>
+                                <input type="number" id="consImport" value="10" step="1">
+                                <span>%</span>
+                            </div>
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consGreenOn" checked>
+                                <label for="consGreenOn">绿电制氢比例 ≥</label>
+                                <input type="number" id="consGreen" value="90" step="1">
+                                <span>%</span>
+                            </div>
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consExportOn">
+                                <label for="consExportOn">上网比例 ≤</label>
+                                <input type="number" id="consExport" value="10" step="1">
+                                <span>%</span>
+                            </div>
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consExportPowerOn">
+                                <label for="consExportPowerOn">最大上网功率 ≤</label>
+                                <input type="number" id="consExportPower" value="100" step="10">
+                                <span>MW</span>
+                            </div>
+                            <div class="opt-cons-row">
+                                <input type="checkbox" id="consImportPowerOn">
+                                <label for="consImportPowerOn">最大下网功率 ≤</label>
+                                <input type="number" id="consImportPower" value="100" step="10">
+                                <span>MW</span>
+                            </div>
+                        </div>
+                        <p class="hint">勾选 = 启用该约束。上网比例复用系统参数中的「总量上网比例上限」逻辑。</p>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>③ NSGA-II 参数</h3>
+                        <div class="param-grid">
+                            <div class="param-row"><label>种群规模</label><input type="number" id="optPopulationSize" value="60" min="20" max="200"></div>
+                            <div class="param-row"><label>最大迭代次数</label><input type="number" id="optGenerations" value="100" min="10" max="500"></div>
+                            <div class="param-row"><label>交叉概率</label><input type="number" id="optCrossoverProb" value="0.9" step="0.05" min="0.5" max="1"></div>
+                            <div class="param-row"><label>变异概率</label><input type="number" id="optMutationProb" value="0.1" step="0.01" min="0.01" max="0.5"></div>
+                            <div class="param-row"><label>随机种子</label><input type="number" id="optRandomSeed" value="20260912"></div>
+                            <div class="param-row opt-check-row">
+                                <label>固定随机种子</label>
+                                <input type="checkbox" id="optUseFixedSeed" checked>
+                                <span class="hint">取消勾选则每次优化使用新种子</span>
+                            </div>
+                            <div class="param-row opt-check-row">
+                                <label>启用提前终止</label>
+                                <input type="checkbox" id="optEarlyStopping" checked>
+                                <span class="hint">Pareto前沿长期无改善则自动停止</span>
+                            </div>
+                            <div class="param-row"><label>提前终止耐心值</label><input type="number" id="optPatience" value="15" min="3" max="100"></div>
+                            <div class="param-row"><label>LCOH 折现率 (%)</label><input type="number" id="optLcohDiscount" value="5.0" step="0.5"></div>
+                        </div>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>④ 综合推荐权重</h3>
+                        <div class="param-grid">
+                            <div class="param-row"><label>FIRR 权重 (%)</label><input type="number" id="optWeightFirr" value="40" step="5"></div>
+                            <div class="param-row"><label>LCOH 权重 (%)</label><input type="number" id="optWeightLcoh" value="35" step="5"></div>
+                            <div class="param-row"><label>弃电率 权重 (%)</label><input type="number" id="optWeightCurtail" value="25" step="5"></div>
+                            <div class="param-row"><label>权重合计</label><span class="opt-weight-sum" id="optWeightSum">100%</span></div>
+                        </div>
+                        <p class="hint">权重仅用于从 Pareto 前沿中挑选「综合推荐方案」，不参与 NSGA-II 适应度。</p>
+                    </div>
+
+                    <div class="param-section">
+                        <h3>⑤ 基准方案（Baseline）</h3>
+                        <div class="param-grid">
+                            <div class="param-row"><label>风电容量 (MW)</label><input type="number" id="baseWind" value="200" step="10"></div>
+                            <div class="param-row"><label>光伏容量 (MW)</label><input type="number" id="basePv" value="360" step="10"></div>
+                            <div class="param-row"><label>储能功率 (MW)</label><input type="number" id="baseStoragePower" value="100" step="10"></div>
+                            <div class="param-row"><label>储能时长 (h)</label><input type="number" id="baseStorageDuration" value="2" step="1"></div>
+                            <div class="param-row"><label>电解槽容量 (MW)</label><input type="number" id="baseElectrolyzer" value="160" step="10"></div>
+                        </div>
+                        <button class="btn btn-sm btn-outline" id="btnLoadBaseline" style="margin-top:8px">↻ 读取「电量计算」页当前参数</button>
+                    </div>
+
+                    <div class="param-actions">
+                        <button class="btn btn-primary btn-lg" id="btnRunOptimization">
+                            <span class="btn-icon">▶</span> 开始优化
+                        </button>
+                        <button class="btn btn-secondary" id="btnStopOptimization" style="display:none">
+                            <span class="btn-icon">⏹</span> 停止优化
+                        </button>
+                        <div class="hint" id="optEngineMode">计算模式：未启动</div>
+                    </div>
+                </aside>
+
+                <!-- 右侧：优化结果 -->
+                <div class="result-panel">
+                    <!-- 优化进度 -->
+                    <div class="opt-progress" id="optProgress" style="display:none">
+                        <div class="opt-progress-head">
+                            <span id="optProgressTitle">优化进行中...</span>
+                            <span id="optProgressGen">第 0 / 0 代</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="optProgressFill" style="width:0%"></div>
+                        </div>
+                        <div class="opt-progress-stats" id="optProgressStats"></div>
+                    </div>
+
+                    <!-- 子标签页 -->
+                    <div class="sub-tabs">
+                        <button class="sub-tab-btn active" data-subtab="opt-recommend">🏆 推荐方案</button>
+                        <button class="sub-tab-btn" data-subtab="opt-pareto">📋 Pareto方案</button>
+                        <button class="sub-tab-btn" data-subtab="opt-charts">📈 Pareto图</button>
+                        <button class="sub-tab-btn" data-subtab="opt-convergence">📉 收敛曲线</button>
+                        <button class="sub-tab-btn" data-subtab="opt-detail">🔍 方案详情</button>
+                        <button class="sub-tab-btn" data-subtab="opt-history">🕒 优化历史</button>
+                    </div>
+
+                    <!-- 推荐方案 -->
+                    <div class="sub-tab-panel active" id="subtab-opt-recommend">
+                        <div class="table-controls">
+                            <button class="btn btn-sm btn-outline" id="btnExportOptimization" disabled>📥 导出优化结果Excel</button>
+                            <button class="btn btn-sm btn-outline" id="btnLoadRecommendedToSim" disabled>🔁 载入推荐方案到「电量计算」页</button>
+                            <button class="btn btn-sm btn-outline" id="btnView8760" disabled>📊 查看8760小时运行结果</button>
+                        </div>
+                        <div class="opt-scroll" id="optRecommendArea">
+                            <div class="chart-placeholder">设置优化变量、工程约束与 NSGA-II 参数后，点击「开始优化」</div>
+                        </div>
+                    </div>
+
+                    <!-- Pareto 方案列表 -->
+                    <div class="sub-tab-panel" id="subtab-opt-pareto">
+                        <div class="table-controls">
+                            <label class="opt-inline-label">排序：</label>
+                            <select id="optParetoSort" class="scheme-select">
+                                <option value="score">综合得分（高→低）</option>
+                                <option value="firr">FIRR（高→低）</option>
+                                <option value="lcoh">LCOH（低→高）</option>
+                                <option value="curtailment">弃电率（低→高）</option>
+                                <option value="hydrogen">年制氢量（高→低）</option>
+                                <option value="investment">总投资（低→高）</option>
+                            </select>
+                            <label class="opt-inline-label">筛选：</label>
+                            <select id="optParetoFilter" class="scheme-select">
+                                <option value="all">全部 Pareto 方案</option>
+                                <option value="top20">前 20 个</option>
+                                <option value="economic">FIRR ≥ 0</option>
+                            </select>
+                            <span class="hint" id="optParetoCount">—</span>
+                        </div>
+                        <div class="table-container">
+                            <table class="data-table" id="optParetoTable">
+                                <thead><tr><th colspan="12">暂无优化结果</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        <p class="hint">提示：点击任意行可查看该方案的完整技术经济指标，并可一键复核 8760 小时运行结果。</p>
+                    </div>
+
+                    <!-- Pareto 图 -->
+                    <div class="sub-tab-panel" id="subtab-opt-charts">
+                        <div class="chart-controls">
+                            <select id="optParetoChartType" class="scheme-select">
+                                <option value="firr-lcoh">X：LCOH（元/kg） — Y：FIRR（%）</option>
+                                <option value="lcoh-curtail">X：LCOH（元/kg） — Y：弃电率（%）</option>
+                                <option value="scale-firr">X：风电+光伏装机（MW） — Y：FIRR（%）</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" id="btnExportOptChartPng" disabled>📷 导出当前图PNG</button>
+                        </div>
+                        <div class="chart-container opt-chart-box" id="optParetoChart">
+                            <div class="chart-placeholder">优化完成后在此处查看 Pareto 前沿</div>
+                        </div>
+                        <p class="hint">点击散点可查看对应方案的详细技术经济指标（含风电/光伏/储能/电解槽/制氢量/弃电率/LCOH/FIRR）。</p>
+                    </div>
+
+                    <!-- 收敛曲线 -->
+                    <div class="sub-tab-panel" id="subtab-opt-convergence">
+                        <div class="opt-scroll">
+                            <div class="opt-chart-box" id="optConvFirr" style="height:220px"></div>
+                            <div class="opt-chart-box" id="optConvLcoh" style="height:220px"></div>
+                            <div class="opt-chart-box" id="optConvCurtail" style="height:220px"></div>
+                        </div>
+                        <p class="hint">用于判断算法是否已基本收敛（曲线趋于平缓）。</p>
+                    </div>
+
+                    <!-- 方案详情 -->
+                    <div class="sub-tab-panel" id="subtab-opt-detail">
+                        <div class="opt-scroll" id="optSchemeDetail">
+                            <div class="chart-placeholder">在「Pareto方案」列表中点击任意方案查看详情</div>
+                        </div>
+                    </div>
+
+                    <!-- 优化历史 -->
+                    <div class="sub-tab-panel" id="subtab-opt-history">
+                        <div class="table-controls">
+                            <span class="hint" id="optHistorySummary">—</span>
+                        </div>
+                        <div class="table-container">
+                            <table class="data-table" id="optHistoryTable">
+                                <thead><tr><th colspan="8">暂无优化历史</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- 底部日志区 -->
+    <footer class="footer">
+        <div class="log-panel">
+            <div class="log-header">
+                <span>📝 运行日志</span>
+                <button class="btn btn-xs" id="btnClearLog">清除</button>
+            </div>
+            <div class="log-content" id="logContent"></div>
+        </div>
+        <div class="status-bar">
+            <span id="statusText">就绪</span>
+            <span class="separator">|</span>
+            <span>计算引擎: Web Worker</span>
+            <span class="separator">|</span>
+            <span>数据: 浏览器内存</span>
+        </div>
+    </footer>
+
+    <!-- 第三方库（本地 vendor） -->
+    <script src="js/vendor/xlsx.full.min.js"></script>
+    <script src="js/vendor/exceljs.min.js"></script>
+    <script src="js/vendor/echarts.min.js"></script>
+    <script src="js/vendor/jszip.min.js"></script>
+    <script src="js/vendor/FileSaver.min.js"></script>
+
+    <!-- 应用模块 -->
+    <script src="js/utils.js"></script>
+    <script src="js/excel-io.js"></script>
+    <script src="js/simulation-engine.js"></script>
+    <script src="js/data-summary.js"></script>
+    <script src="js/estimate.js"></script>
+    <script src="js/finance-engine.js"></script>
+    <script src="js/chart-module.js"></script>
+    <!-- V2.1 新增：NSGA-II 多目标容量优化引擎（optimization-worker.js 由 Worker 按需加载，不在主线程引入） -->
+    <script src="js/optimization-engine.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
