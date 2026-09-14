@@ -309,7 +309,7 @@ section('Test 6  NSGA-II 10 代');
             electrolyzerCapacity: { min: 50, max: 200, step: 50 },
         },
         nsga2: { populationSize: 24, generations: 10, crossoverProbability: 0.9, mutationProbability: 0.1, randomSeed: 20260912, earlyStopping: false, patience: 15 },
-        recommendationWeights: { firr: 0.4, lcoh: 0.35, curtailmentRate: 0.25 },
+        recommendationWeights: { eirr: 0.4, lcoh: 0.35, curtailmentRate: 0.25 },
         lcoh: { discountRate: 5.0 },
         baseline: SCHEME,
     });
@@ -369,7 +369,7 @@ section('Test 7  Worker 运行（vm 模拟 Worker 环境，真实执行 optimiza
                 electrolyzerCapacity: { min: 50, max: 200, step: 50 },
             },
             nsga2: { populationSize: 12, generations: 4, crossoverProbability: 0.9, mutationProbability: 0.1, randomSeed: 20260912, earlyStopping: false, patience: 15 },
-            recommendationWeights: { firr: 0.4, lcoh: 0.35, curtailmentRate: 0.25 },
+            recommendationWeights: { eirr: 0.4, lcoh: 0.35, curtailmentRate: 0.25 },
             lcoh: { discountRate: 5.0 },
             baseline: SCHEME,
         });

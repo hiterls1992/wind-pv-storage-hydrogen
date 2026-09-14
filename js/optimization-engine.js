@@ -21,8 +21,8 @@
  *
  * 优化目标（NSGA-II 内部统一为最小化）
  * ------------------------------------
- *   objective1 = -FIRR            （最大化 FIRR）
- *   objective2 =  LCOH            （最小化 元/kg-H₂）
+ *   objective1 = -EIRR           （最大化 资本金内部收益率 EIRR）
+ *   objective2 =  LCOH           （最小化 元/kg-H₂）
  *   objective3 =  CurtailmentRate （最小化 弃电率）
  *
  * 约束处理：可行性优先
@@ -56,7 +56,7 @@
         electrolyzerCapacity: { label: '电解槽容量', unit: 'MW' },
     };
 
-    /** 数值比较容差（相对容差，兼顾 -FIRR / LCOH / 弃电率 三种量级） */
+    /** 数值比较容差（相对容差，兼顾 -EIRR / LCOH / 弃电率 三种量级） */
     const REL_EPS = 1e-9;
 
     // ======================================================================
@@ -197,7 +197,7 @@
             },
 
             /** 参与优化的目标开关（本版本三个目标默认全开） */
-            objectives: { firr: true, lcoh: true, curtailmentRate: true },
+            objectives: { eirr: true, lcoh: true, curtailmentRate: true },
 
             /** NSGA-II 进化参数 */
             nsga2: {
@@ -215,7 +215,7 @@
             lcoh: { discountRate: 5.0 },
 
             /** 综合推荐权重（仅用于从 Pareto 前沿挑选推荐方案） */
-            recommendationWeights: { firr: 0.40, lcoh: 0.35, curtailmentRate: 0.25 },
+            recommendationWeights: { eirr: 0.40, lcoh: 0.35, curtailmentRate: 0.25 },
 
             /** 基准方案（Baseline），由前端填充 */
             baseline: null,
@@ -413,6 +413,25 @@
     }
 
     /**
+     * 仿真键（V2.3.1 任务书 §9 / §10）：委托 ResultDataStore.createSimulationKey。
+     * 结果数据层未加载时退化为 schemeKey（与 V2.3 行为一致，不中断计算）。
+     */
+    function simulationKeyFor(scheme, schemeKeyStr, context) {
+        const g = rt();
+        if (g.ResultDataStore && typeof g.ResultDataStore.createSimulationKey === 'function') {
+            return g.ResultDataStore.createSimulationKey({
+                scheme: scheme,
+                schemeKey: schemeKeyStr,
+                simulationConfig: context ? context.simulationConfig : undefined,
+                inputVersion: context ? context.inputVersion : undefined,
+                engineVersion: (typeof SIMULATION_ENGINE_VERSION !== 'undefined')
+                    ? SIMULATION_ENGINE_VERSION : undefined,
+            });
+        }
+        return schemeKeyStr;
+    }
+
+    /**
      * 统一单方案评价：一组容量参数 → 完整技术经济评价
      *
      * 输入：scheme（5 个容量参数）+ context（风光8760数据 / 仿真参数 / 概算单价 / 财务参数）
@@ -428,10 +447,15 @@
         const scheme = completeScheme(schemeIn);
         const key = schemeKey(scheme);
 
+        // V2.3.1（任务书 §9 / §13）：评价缓存的键从 schemeKey 升级为 simulationKey。
+        // schemeKey 只描述"建多大"；simulationKey = 方案 + 运行参数 + 输入数据版本 + 算法版本，
+        // 保证"同方案不同运行参数 / 不同输入数据"不会命中旧缓存。
+        const simKey = simulationKeyFor(scheme, key, context);
+
         // ---- 缓存：同一方案禁止重复运行 8760 小时仿真 ----
-        if (context.cache && context.cache.has(key)) {
+        if (context.cache && context.cache.has(simKey)) {
             if (context.stats) context.stats.cacheHits++;
-            return context.cache.get(key);
+            return context.cache.get(simKey);
         }
 
         const co = collaborators();
@@ -511,6 +535,10 @@
         const preTaxCFs = (fin.detail.project_cf || []).map(cf => cf.net_cf_pre_tax);
         const firr = resolveIrr(R['项目投资财务内部收益率（所得税前）（%）'], preTaxCFs);
         const firrPostTax = resolveIrr(R['项目投资财务内部收益率（所得税后）（%）'], preTaxCFs);
+        // V2.3.2：优化目标的经济口径切换为「资本金内部收益率（EIRR）」。
+        // 与 FIRR 相同的无解判定（现金流无符号变化 / 引擎返回 0）→ null = 经济评价不可行。
+        const equityCFs = (fin.detail.equity_cf || []).map(cf => cf.net_cf);
+        const eirr = resolveIrr(R['资本金财务内部收益率（%）'], equityCFs);
 
         const economic = {
             totalInvestment: R['项目总投资（万元）'],
@@ -534,22 +562,21 @@
         };
 
         // ---- 7. 目标向量（统一最小化） ----
-        const firrForObjective = (firr === null) ? NaN : firr;
         const objectives = {
-            firr: firr,                                    // %（null 表示经济评价不可行）
+            eirr: eirr,                                    // %（null 表示经济评价不可行）
             lcoh: economic.LCOH,                           // 元/kg
             curtailmentRate: curtailmentRate,              // 0~1
         };
         const vector = [
-            (firr === null) ? 1e6 : -firr,                 // 最大化 FIRR → 最小化 -FIRR
+            (eirr === null) ? 1e6 : -eirr,                 // 最大化 EIRR → 最小化 -EIRR
             economic.LCOH,                                  // 最小化 LCOH
             curtailmentRate,                                // 最小化弃电率
         ];
-        void firrForObjective;
 
         const unified = {
             scheme: scheme,
             key: key,
+            simulationKey: simKey,
             technical: technical,
             economic: economic,
             constraints: null,     // 见下
@@ -562,7 +589,7 @@
         unified.constraints = checkConstraints(unified, context.config);
 
         // ---- 写缓存 ----
-        if (context.cache) context.cache.set(key, unified);
+        if (context.cache) context.cache.set(simKey, unified);
         if (context.stats) {
             context.stats.evaluated++;
             // V2.3：性能诊断用的累计耗时（§14），不参与任何优化计算
@@ -668,10 +695,10 @@
             }
         }
 
-        // 52. 财务指标异常：FIRR 无法计算的方案判为「经济评价不可行」
-        const economicViable = (result.economic.FIRR !== null && isFinite(result.economic.FIRR));
+        // 52. 财务指标异常：资本金内部收益率（EIRR，优化经济目标）无法计算的方案判为「经济评价不可行」
+        const economicViable = (result.economic.EIRR !== null && isFinite(result.economic.EIRR));
         if (!economicViable) {
-            addViolation('财务内部收益率(FIRR)', null, null, '%', 1.0);
+            addViolation('资本金内部收益率(EIRR)', null, null, '%', 1.0);
         }
 
         const violationAmount = violations.reduce((s, v) => s + v.amount, 0);
@@ -1055,7 +1082,7 @@
      */
     function normalizeObjectives(solutions) {
         const pick = (fn) => solutions.map(fn).filter(v => v !== null && isFinite(v));
-        const firrVals = pick(s => s.objectives.firr);
+        const eirrVals = pick(s => s.objectives.eirr);
         const lcohVals = pick(s => s.objectives.lcoh);
         const curtVals = pick(s => s.objectives.curtailmentRate);
 
@@ -1067,21 +1094,21 @@
             return { min: mn, span: mx - mn };
         }
 
-        const rFirr = range(firrVals);
+        const rEirr = range(eirrVals);
         const rLcoh = range(lcohVals);
         const rCurt = range(curtVals);
 
         return solutions.map(s => {
-            const firr = s.objectives.firr;
+            const eirr = s.objectives.eirr;
             const lcoh = s.objectives.lcoh;
             const curt = s.objectives.curtailmentRate;
 
-            // FIRR 越高越好；LCOH / 弃电率 越低越好
+            // EIRR 越高越好；LCOH / 弃电率 越低越好
             // 目标值全部相同（range 为 null）时该维度视为满分，不影响排序
-            let firrScore;
-            if (firr === null || !isFinite(firr)) firrScore = 0;          // 经济不可行 → 最差
-            else if (rFirr) firrScore = (firr - rFirr.min) / rFirr.span;
-            else firrScore = 1;
+            let eirrScore;
+            if (eirr === null || !isFinite(eirr)) eirrScore = 0;          // 经济不可行 → 最差
+            else if (rEirr) eirrScore = (eirr - rEirr.min) / rEirr.span;
+            else eirrScore = 1;
 
             let lcohScore;
             if (!isFinite(lcoh)) lcohScore = 0;
@@ -1095,7 +1122,7 @@
 
             return {
                 key: s.key,
-                firrScore: firrScore,
+                eirrScore: eirrScore,
                 lcohScore: lcohScore,
                 curtailmentScore: curtScore,
             };
@@ -1111,9 +1138,9 @@
 
         const scores = normalizeObjectives(paretoSolutions);
         const w = config.recommendationWeights;
-        let wSum = (Number(w.firr) || 0) + (Number(w.lcoh) || 0) + (Number(w.curtailmentRate) || 0);
+        let wSum = (Number(w.eirr) || 0) + (Number(w.lcoh) || 0) + (Number(w.curtailmentRate) || 0);
         if (!(wSum > 0)) wSum = 1;
-        const wf = (Number(w.firr) || 0) / wSum;
+        const we = (Number(w.eirr) || 0) / wSum;
         const wl = (Number(w.lcoh) || 0) / wSum;
         const wc = (Number(w.curtailmentRate) || 0) / wSum;
 
@@ -1121,7 +1148,7 @@
         for (let i = 0; i < paretoSolutions.length; i++) {
             const s = paretoSolutions[i];
             const sc = scores[i];
-            const total = wf * sc.firrScore + wl * sc.lcohScore + wc * sc.curtailmentScore;
+            const total = we * sc.eirrScore + wl * sc.lcohScore + wc * sc.curtailmentScore;
             s.scores = sc;
             s.score = total;
 
@@ -1156,10 +1183,10 @@
         let economicBest = null, hydrogenCostBest = null, curtailmentBest = null;
 
         for (const s of paretoSolutions) {
-            // 方案A：FIRR 最高
-            if (s.economic.FIRR !== null && isFinite(s.economic.FIRR)) {
-                if (!economicBest || s.economic.FIRR > economicBest.economic.FIRR + 1e-12) economicBest = s;
-                else if (Math.abs(s.economic.FIRR - economicBest.economic.FIRR) <= 1e-12) economicBest = tieBreak(economicBest, s);
+            // 方案A：资本金内部收益率（EIRR）最高
+            if (s.economic.EIRR !== null && isFinite(s.economic.EIRR)) {
+                if (!economicBest || s.economic.EIRR > economicBest.economic.EIRR + 1e-12) economicBest = s;
+                else if (Math.abs(s.economic.EIRR - economicBest.economic.EIRR) <= 1e-12) economicBest = tieBreak(economicBest, s);
             }
             // 方案B：LCOH 最低
             if (isFinite(s.economic.LCOH)) {
@@ -1251,7 +1278,13 @@
         ctx.config = config;
         ctx.lcohDiscountRate = Number(config.lcoh.discountRate);
         ctx.cache = ctx.cache || new Map();
-        ctx.stats = { evaluated: 0, cacheHits: 0 };
+        // V2.3.1 修复：保留调用方传入的 stats 对象。
+        // 旧实现无条件重建 ctx.stats，导致调用方（Worker 的 performanceStats、
+        // 基准脚本）累计的 evalTimeMs / simTimeMs 永远读不到（始终为 0）。
+        ctx.stats = (opts.context && opts.context.stats) ? opts.context.stats
+            : { evaluated: 0, cacheHits: 0, evalTimeMs: 0, simTimeMs: 0 };
+        if (ctx.stats.evalTimeMs === undefined) ctx.stats.evalTimeMs = 0;
+        if (ctx.stats.simTimeMs === undefined) ctx.stats.simTimeMs = 0;
         ctx.rng = createRng(Number(config.nsga2.randomSeed) || 20260912);
 
         validateContext(ctx);
@@ -1285,12 +1318,12 @@
             const feasible = population.filter(ind => ind.feasible);
             const pool = feasible.length > 0 ? feasible : population;
 
-            let bestFIRR = null, bestLCOH = Infinity, bestCurt = Infinity;
+            let bestEirr = null, bestLCOH = Infinity, bestCurt = Infinity;
             for (const ind of pool) {
                 const ev = ind.evaluation;
                 if (!ev) continue;
-                const f = ev.objectives.firr;
-                if (f !== null && isFinite(f) && (bestFIRR === null || f > bestFIRR)) bestFIRR = f;
+                const e = ev.objectives.eirr;
+                if (e !== null && isFinite(e) && (bestEirr === null || e > bestEirr)) bestEirr = e;
                 if (isFinite(ev.objectives.lcoh) && ev.objectives.lcoh < bestLCOH) bestLCOH = ev.objectives.lcoh;
                 if (isFinite(ev.objectives.curtailmentRate) && ev.objectives.curtailmentRate < bestCurt) bestCurt = ev.objectives.curtailmentRate;
             }
@@ -1305,7 +1338,7 @@
                 cacheHits: ctx.stats.cacheHits,
                 feasibleCount: feasible.length,
                 paretoCount: paretoCount,
-                bestFIRR: bestFIRR,
+                bestEirr: bestEirr,
                 bestLCOH: isFinite(bestLCOH) ? bestLCOH : null,
                 bestCurtailmentRate: isFinite(bestCurt) ? bestCurt : null,
                 effectivePopulationSize: effectivePopulation,
@@ -1323,7 +1356,7 @@
                 evaluatedCount: snap.evaluated,
                 feasibleCount: snap.feasibleCount,
                 paretoCount: snap.paretoCount,
-                bestFIRR: snap.bestFIRR,
+                bestEirr: snap.bestEirr,
                 bestLCOH: snap.bestLCOH,
                 bestCurtailmentRate: snap.bestCurtailmentRate,
             });
@@ -1332,14 +1365,14 @@
         /** 提前终止判据：Pareto 前沿综合指标是否仍有明显改善 */
         function checkImprovement(snap) {
             if (!bestSnapshot) { bestSnapshot = snap; stagnantGenerations = 0; return; }
-            const betterFirr = (snap.bestFIRR !== null && isFinite(snap.bestFIRR)) &&
-                (bestSnapshot.bestFIRR === null || snap.bestFIRR > bestSnapshot.bestFIRR + 1e-4);
+            const betterEirr = (snap.bestEirr !== null && isFinite(snap.bestEirr)) &&
+                (bestSnapshot.bestEirr === null || snap.bestEirr > bestSnapshot.bestEirr + 1e-4);
             const betterLcoh = (snap.bestLCOH !== null) && (bestSnapshot.bestLCOH === null ||
                 snap.bestLCOH < bestSnapshot.bestLCOH * (1 - 1e-4));
             const betterCurt = (snap.bestCurtailmentRate !== null) && (bestSnapshot.bestCurtailmentRate === null ||
                 snap.bestCurtailmentRate < bestSnapshot.bestCurtailmentRate * (1 - 1e-4));
 
-            if (betterFirr || betterLcoh || betterCurt) {
+            if (betterEirr || betterLcoh || betterCurt) {
                 stagnantGenerations = 0;
                 bestSnapshot = snap;
             } else {

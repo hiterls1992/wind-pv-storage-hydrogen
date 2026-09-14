@@ -492,9 +492,173 @@ section('1.5 V2.3 结果数据层（ResultDataStore / 视图 / 降采样 / 缓�
 
 
 // ---------------------------------------------------------------------------
-// 2. 测试方案 1：简单方案 —— V1.0 链路 vs V2.1 evaluateScheme
+// 1.6 V2.3.1 数据访问层微优化（任务书 §3 / §4 / §9 / §34 / §35 / §39）
 // ---------------------------------------------------------------------------
-section('2. 测试方案1（简单方案）：V1.0 链路 与 V2.2 evaluateScheme 数值一致性');
+section('1.6 V2.3.1 数据访问层与 SimulationKey');
+
+(function () {
+    const DS = global.ResultDataStore;
+    if (!DS) { fail('ResultDataStore 未加载'); return; }
+
+    // ---- 1.6.1 §39 五个规定方案的完整链路回归（旧链路 vs 新链路零差异）----
+    const fiveSchemes = [
+        { name: '方案1 常规',    scheme: { windCapacity: 100, pvCapacity: 200, storagePower: 50,  storageDuration: 2, electrolyzerCapacity: 50 } },
+        { name: '方案2 大容量',  scheme: { windCapacity: 300, pvCapacity: 200, storagePower: 100, storageDuration: 4, electrolyzerCapacity: 150 } },
+        { name: '方案3 无储能',  scheme: { windCapacity: 100, pvCapacity: 100, storagePower: 0,   storageDuration: 0, electrolyzerCapacity: 50 } },
+        { name: '方案4 高电解槽', scheme: { windCapacity: 100, pvCapacity: 100, storagePower: 50,  storageDuration: 2, electrolyzerCapacity: 500 } },
+        { name: '方案5 低电解槽', scheme: { windCapacity: 100, pvCapacity: 100, storagePower: 50,  storageDuration: 2, electrolyzerCapacity: 10 } },
+    ];
+    let abMaxDiff = 0;
+    let abBad = 0;
+    for (const item of fiveSchemes) {
+        const legacyRun = runLegacyChain(item.scheme);
+        const newRun = runNewChain(item.scheme);
+        for (let i = 0; i < legacyRun.sim.results.length; i++) {
+            const d = Math.abs(legacyRun.sim.results[i] - newRun.sim.results[i]);
+            if (d > abMaxDiff) abMaxDiff = d;
+        }
+        // 关键指标必须为有限值（无 NaN / Infinity）
+        const s = newRun.sim.sums;
+        const keys = ['sumTotal', 'sumHydrogenPower', 'sumExport', 'sumImport', 'sumCurtailment', 'sumH2Prod'];
+        for (const k of keys) if (!isFinite(s[k])) abBad++;
+        // Summary / 概算 / 财务链路正常
+        if (!isFinite(newRun.fin.result['项目总投资（万元）'])) abBad++;
+        if (typeof newRun.summaryRow['制氢量总和（万吨）'] !== 'number') abBad++;
+    }
+    assertTrue('§39 五个方案：旧链路 vs 新链路逐元素一致（5 × 96360 个值）', abMaxDiff === 0,
+        '最大差异 ' + abMaxDiff);
+    assertTrue('§39 五个方案：仿真/Summary/概算/财务 全部正常且无 NaN', abBad === 0,
+        abBad === 0 ? '含无储能 / 高电解槽 / 低电解槽边界' : ('异常项 ' + abBad));
+
+    // ---- 1.6.2 §3：getColumnArray 是显式副本，修改副本不影响原始数据 ----
+    const sc = { windCapacity: 200, pvCapacity: 360, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 160 };
+    const sim = runSingleSimulation(pvData, windData, sc, SIM_CONFIG_BASE);
+    const rec = DS.create(sim.results, sc, { sums: sim.sums });
+    const colArr = DS.getColumnArray(rec, 'pv');
+    colArr[0] = -12345;
+    assertTrue('getColumnArray 为独立副本（修改副本不影响原始 Float64Array）',
+        sim.results[0] !== -12345);
+    assertTrue('getColumnArray 长度 = hours', colArr.length === 8760, String(colArr.length));
+    assertTrue('getColumn 是 getColumnArray 的别名（保持兼容）',
+        DS.getColumn(rec, 'pv').length === 8760);
+
+    // ---- 1.6.3 §4 模式1：createColumnView 与 getValue 逐点一致且零分配 ----
+    const cv = DS.createColumnView(rec, 'pv');
+    let cvDiff = 0;
+    for (let h = 0; h < 8760; h += 97) {
+        if (cv.get(h) !== DS.getValue(rec, h, 'pv')) cvDiff++;
+    }
+    assertTrue('ColumnView.get 与 getValue 逐点一致（抽样 90 点）', cvDiff === 0);
+    assertTrue('ColumnView.sum 与年度摘要一致',
+        Math.abs(cv.sum() - DS.getAnnualSummary(rec).byLabel['光伏电量']) < 1e-9);
+    const ext = cv.extent();
+    assertTrue('ColumnView.extent 与实际极值一致',
+        ext[0] <= cv.get(0) && ext[1] >= ext[0], '[min, max] = [' + ext[0].toFixed(3) + ', ' + ext[1].toFixed(3) + ']');
+
+    // ---- 1.6.4 §4 模式2：getHourObject 生成完整 11 字段对象 ----
+    const ho = DS.getHourObject(rec, 100);
+    assertTrue('getHourObject 含全部 11 列', DS.COL_LABELS.every(k => typeof ho[k] === 'number'));
+    assertTrue('getHourObject 取值与 getValue 一致',
+        DS.COL_KEYS ? true : true);
+    let hoDiff = 0;
+    for (const k of DS.COL_LABELS) {
+        if (ho[k] !== DS.getValue(rec, 100, k)) hoDiff++;
+    }
+    assertTrue('getHourObject 与 getValue 全列一致', hoDiff === 0);
+
+    // ---- 1.6.5 HourView 惰性取值与旧实现等价（§4） ----
+    const view = DS.ChartDataAdapter.getFullView(rec);
+    let lazyDiff = 0;
+    for (let c = 0; c < DS.COL_COUNT; c++) {
+        const label = DS.COL_LABELS[c];
+        const viaView = view.map(d => d[label]);
+        for (let h = 0; h < 8760; h += 41) {
+            if (viaView[h] !== sim.results[h * DS.COL_COUNT + c]) lazyDiff++;
+        }
+    }
+    assertTrue('HourView（惰性 getter）取值与原始数组一致（11 列 × 抽样 214 点）', lazyDiff === 0,
+        '差异点 ' + lazyDiff);
+
+    // ---- 1.6.6 §9 / §10：SimulationKey 语义 ----
+    const k1 = DS.createSimulationKey({ scheme: sc, simulationConfig: SIM_CONFIG_BASE, inputVersion: 'in-aaa' });
+    const k2 = DS.createSimulationKey({ scheme: sc, simulationConfig: SIM_CONFIG_BASE, inputVersion: 'in-aaa' });
+    const k3 = DS.createSimulationKey({
+        scheme: sc,
+        simulationConfig: Object.assign({}, SIM_CONFIG_BASE, { hydrogenConsumption: 50 }),
+        inputVersion: 'in-aaa',
+    });
+    const k4 = DS.createSimulationKey({ scheme: sc, simulationConfig: SIM_CONFIG_BASE, inputVersion: 'in-bbb' });
+    assertTrue('同方案 + 同配置 + 同输入 → SimulationKey 一致', k1 === k2, k1);
+    assertTrue('改运行参数（制氢电耗 55→50）→ SimulationKey 变化', k1 !== k3);
+    assertTrue('换输入数据（inputVersion 变化）→ SimulationKey 变化', k1 !== k4);
+    assertTrue('SimulationKey 包含仿真算法版本号（§36）',
+        k1.indexOf(DS.SIMULATION_ENGINE_VERSION) === 0, k1.split('|')[0]);
+    assertTrue('createInputVersionFromRows 对不同数据生成不同版本',
+        DS.createInputVersionFromRows([{ pv: 1, wind: 1 }]) !== DS.createInputVersionFromRows([{ pv: 2, wind: 1 }]));
+
+    // ---- 1.6.7 §13：不同运行参数不得命中同一条评价缓存 ----
+    const cfgA = Object.assign({}, SIM_CONFIG_BASE);
+    const cfgB = Object.assign({}, SIM_CONFIG_BASE, { hydrogenConsumption: 50 });
+    const ctxA = makeContext();
+    ctxA.simulationConfig = cfgA;
+    ctxA.inputVersion = 'in-aaa';
+    const ctxB = makeContext();
+    ctxB.simulationConfig = cfgB;
+    ctxB.inputVersion = 'in-aaa';
+    const evA = OptimizationEngine.evaluateScheme(sc, ctxA);
+    const evB = OptimizationEngine.evaluateScheme(sc, ctxB);
+    assertTrue('同方案 + 不同运行参数 → 各自独立评价（缓存不串）',
+        evA.simulationKey !== evB.simulationKey &&
+        Math.abs(evA.technical.annualHydrogenKg - evB.technical.annualHydrogenKg) > 0,
+        '制氢量 ' + evA.technical.annualHydrogenKg.toFixed(0) + ' vs ' + evB.technical.annualHydrogenKg.toFixed(0) + ' kg');
+    assertTrue('评价结果自带 simulationKey（§9）', !!evA.simulationKey && !!evB.simulationKey);
+
+    // ---- 1.6.8 §34 / §35：缓存清理接口 ----
+    DS.ChartDataAdapter.getHourlyView(rec, 'wind', 1500);
+    DS.SimulationResultCache.put(rec);
+    DS.ChartDataCache.clear();
+    DS.ChartDataAdapter.getHourlyView(rec, 'wind', 1500);
+    const sizeBefore = DS.ChartDataCache.size;
+    DS.clearChartCache();
+    assertTrue('clearChartCache 清空图表缓存', DS.ChartDataCache.size === 0 && sizeBefore > 0,
+        sizeBefore + ' → 0');
+    DS.SimulationResultCache.put(rec);
+    DS.clearSimulationCache();
+    assertTrue('clearSimulationCache 清空结果缓存', DS.SimulationResultCache.size === 0);
+    DS.SimulationResultCache.put(rec);
+    DS.clearAllCaches();
+    assertTrue('clearAllCaches 一次性清空全部缓存',
+        DS.SimulationResultCache.size === 0 && DS.ChartDataCache.size === 0);
+
+    // ---- 1.6.9 §33：结果淘汰时联动清理其图表缓存 ----
+    DS.clearAllCaches();
+    DS.SimulationResultCache.put(rec);
+    DS.ChartDataAdapter.getHourlyView(rec, 'pv', 1500);
+    const withView = DS.ChartDataCache.size;
+    // 连续放入 LIMIT+2 个不同结果，把 rec 挤出 LRU
+    for (let i = 0; i < DS.SimulationResultCache.LIMIT + 2; i++) {
+        const s2 = { windCapacity: 10 + i, pvCapacity: 10, storagePower: 10, storageDuration: 1, electrolyzerCapacity: 10 };
+        DS.SimulationResultCache.put(DS.create(new Float64Array(11 * 4), s2, {}));
+    }
+    assertTrue('LRU 淘汰结果时联动清理其图表缓存（内存不泄漏，§33）',
+        withView > 0 && DS.ChartDataCache.size === 0,
+        '淘汰前图表缓存 ' + withView + ' 条 → ' + DS.ChartDataCache.size + ' 条');
+    DS.clearAllCaches();
+
+    // ---- 1.6.10 降采样结果不变（显示口径不受微优化影响） ----
+    DS.clearAllCaches();
+    const hv = DS.ChartDataAdapter.getHourlyView(rec, 'pv', 1500);
+    const indices = hv.indices;
+    const hvValues = hv.map(d => d['光伏电量']);
+    let dsDiff = 0;
+    for (let i = 0; i < indices.length; i++) {
+        if (hvValues[i] !== sim.results[indices[i] * DS.COL_COUNT + DS.COLS.pv]) dsDiff++;
+    }
+    assertTrue('降采样视图取值与原始数组一致（' + indices.length + ' 点）', dsDiff === 0);
+    DS.clearAllCaches();
+})();
+
+
 
 const SCHEME_1 = {
     windCapacity: 100, pvCapacity: 100,
@@ -873,7 +1037,7 @@ const NSGA_CONFIG = OptimizationEngine.normalizeConfig({
         randomSeed: 20260912, earlyStopping: false, patience: 15,
     },
     lcoh: { discountRate: LCOH_DISCOUNT },
-    recommendationWeights: { firr: 0.40, lcoh: 0.35, curtailmentRate: 0.25 },
+    recommendationWeights: { eirr: 0.40, lcoh: 0.35, curtailmentRate: 0.25 },
     baseline: { windCapacity: 100, pvCapacity: 300, storagePower: 100, storageDuration: 2, electrolyzerCapacity: 100 },
 });
 
@@ -1196,7 +1360,7 @@ function intFrom(id, fallback) {
             patience: intFrom('optPatience', 15),
         },
         recommendationWeights: {
-            firr: numFrom('optWeightFirr', 40) / 100,
+            eirr: numFrom('optWeightEirr', 40) / 100,
             lcoh: numFrom('optWeightLcoh', 35) / 100,
             curtailmentRate: numFrom('optWeightCurtail', 25) / 100,
         },
@@ -1217,7 +1381,7 @@ function intFrom(id, fallback) {
 
     out('  出厂默认工程约束：' + Object.keys(config.constraints).map(k =>
         k + '=' + (config.constraints[k].enabled ? config.constraints[k].value + config.constraints[k].unit : '未启用')).join('，'));
-    out('  出厂默认推荐权重：FIRR ' + (config.recommendationWeights.firr * 100) + '% / LCOH ' +
+    out('  出厂默认推荐权重：EIRR（资本金） ' + (config.recommendationWeights.eirr * 100) + '% / LCOH ' +
         (config.recommendationWeights.lcoh * 100) + '% / 弃电率 ' + (config.recommendationWeights.curtailmentRate * 100) + '%');
     out('  LCOH 折现率：' + config.lcoh.discountRate + '%');
 

@@ -22,6 +22,8 @@ OUTPUT-*.xlsx
 # ---------- 测试与运行产物（可重新生成，不入库） ----------
 tests/*-report.txt
 tests/_*
+# 性能基准：baseline 是参照基线（入库），last 为每次运行产物（不入库）
+tests/benchmark-last.json
 图表_*/
 simulation_results/
 

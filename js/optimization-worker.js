@@ -121,6 +121,7 @@ if (typeof importScripts !== 'function') {
                 prices: raw.prices,
                 financeParams: raw.financeParams,
                 lcohDiscountRate: raw.lcohDiscountRate,
+                inputVersion: raw.inputVersion,
                 onWarn: function (msg) { self.postMessage({ type: 'warn', message: msg }); }
             };
 

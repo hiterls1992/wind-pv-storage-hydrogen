@@ -53,13 +53,20 @@ const ExcelIO = {
             ws1.addRow(row);
         }
         // 总和行
+        // V2.3.1（任务书 §30）：若调用方已提供年度摘要（totals），直接读取，
+        // 避免为求和再做 10 列 × 8760 次对象属性遍历；否则回退到逐列 reduce。
         const totalRow = {};
         const sumCols = ['光伏电量', '风电电量', '合计电量', '储能充电量', '储能放电量',
                           '制氢电量', '上网电量', '下网电量', '弃电量', '制氢量'];
-        for (const col of sumCols) {
-            totalRow[col] = resultData.hourlyData.reduce((s, r) => s + (r[col] || 0), 0);
+        if (resultData.totals) {
+            for (const col of sumCols) totalRow[col] = resultData.totals[col];
+            totalRow['储能现存容量'] = resultData.totals['储能现存容量'];
+        } else {
+            for (const col of sumCols) {
+                totalRow[col] = resultData.hourlyData.reduce((s, r) => s + (r[col] || 0), 0);
+            }
+            totalRow['储能现存容量'] = resultData.hourlyData[resultData.hourlyData.length - 1]['储能现存容量'];
         }
-        totalRow['储能现存容量'] = resultData.hourlyData[resultData.hourlyData.length - 1]['储能现存容量'];
         ws1.addRow(totalRow);
 
         // 系统参数
@@ -310,7 +317,7 @@ const ExcelIO = {
         ws1.addRow({ '类别': 'NSGA-II', '参数': '提前终止', '步长': ns.earlyStopping ? ('启用（patience=' + ns.patience + '）') : '未启用', '说明': stats.earlyStopped ? '本次已触发提前终止' : '' });
 
         const w = cfg.recommendationWeights || {};
-        ws1.addRow({ '类别': '推荐权重', '参数': 'FIRR 权重', '步长': w.firr, '说明': '仅用于从 Pareto 前沿挑选综合推荐方案' });
+        ws1.addRow({ '类别': '推荐权重', '参数': 'EIRR（资本金）权重', '步长': w.eirr, '说明': '仅用于从 Pareto 前沿挑选综合推荐方案' });
         ws1.addRow({ '类别': '推荐权重', '参数': 'LCOH 权重', '步长': w.lcoh, '说明': '不参与 NSGA-II 适应度' });
         ws1.addRow({ '类别': '推荐权重', '参数': '弃电率 权重', '步长': w.curtailmentRate, '说明': '' });
 
@@ -337,7 +344,7 @@ const ExcelIO = {
         // ---------- Sheet3：代表方案 ----------
         const ws3 = workbook.addWorksheet('代表方案');
         const reps = [
-            ['方案A 经济最优（FIRR最高）', rep.economicBest],
+            ['方案A 经济最优（EIRR最高）', rep.economicBest],
             ['方案B 氢成本最优（LCOH最低）', rep.hydrogenCostBest],
             ['方案C 消纳最优（弃电率最低）', rep.curtailmentBest],
             ['方案D 综合推荐（得分最高）', rep.recommended],
@@ -367,7 +374,7 @@ const ExcelIO = {
             { header: 'Population', key: 'Population', width: 12 },
             { header: 'FeasibleCount', key: 'FeasibleCount', width: 14 },
             { header: 'ParetoCount', key: 'ParetoCount', width: 12 },
-            { header: 'BestFIRR', key: 'BestFIRR', width: 12 },
+            { header: 'BestEIRR', key: 'BestEIRR', width: 12 },
             { header: 'BestLCOH', key: 'BestLCOH', width: 12 },
             { header: 'BestCurtailment', key: 'BestCurtailment', width: 16 },
         ];
@@ -377,7 +384,7 @@ const ExcelIO = {
                 'Population': h.evaluatedCount,
                 'FeasibleCount': h.feasibleCount,
                 'ParetoCount': h.paretoCount,
-                'BestFIRR': this._safeNum(h.bestFIRR, 4),
+                'BestEIRR': this._safeNum(h.bestEirr, 4),
                 'BestLCOH': this._safeNum(h.bestLCOH, 4),
                 'BestCurtailment': this._safeNum(h.bestCurtailmentRate, 6),
             });
@@ -418,7 +425,7 @@ const ExcelIO = {
             ws5.addRow({});
             ws5.addRow({
                 '指标': '结论',
-                'base': '优化后 FIRR 提高 ' + this._deltaText(rRow['FIRR（%）'], bRow['FIRR（%）'], '个百分点'),
+                'base': '优化后 EIRR（资本金）提高 ' + this._deltaText(rRow['EIRR（%）'], bRow['EIRR（%）'], '个百分点'),
                 'rec': 'LCOH 降低 ' + this._deltaText(bRow['LCOH（元/kg）'], rRow['LCOH（元/kg）'], '元/kg'),
                 'delta': '弃电率降低 ' + this._deltaText(bRow['弃电率（%）'], rRow['弃电率（%）'], '个百分点'),
             });

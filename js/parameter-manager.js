@@ -129,7 +129,7 @@
             patience: 15,
         },
         objectives: {},
-        recommendationWeights: { firr: 0.40, lcoh: 0.35, curtailmentRate: 0.25 },
+        recommendationWeights: { eirr: 0.40, lcoh: 0.35, curtailmentRate: 0.25 },
         lcoh: { discountRate: 5.0 },
         baseline: null,
     };

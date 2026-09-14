@@ -425,7 +425,119 @@ section('8. 数据流与性能契约（V2.3 任务书 §5 / §6 / §11 / §20 / 
 })();
 
 // ---------------------------------------------------------------------------
-section('9. 检查汇总');
+section('9. V2.3.1 数据访问层与 SimulationKey 契约');
+(function () {
+    const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const store = read('js/result-data-store.js');
+    const engine = read('js/optimization-engine.js');
+    const simEng = read('js/simulation-engine.js');
+    const app = read('js/app.js');
+    const utils = read('js/utils.js');
+
+    // 9.1 §3：不得再用"零拷贝"描述 getColumn；必须有显式副本语义的 getColumnArray
+    if (store.indexOf('不是零拷贝') >= 0 && store.indexOf('临时 Float64Array') >= 0) {
+        ok('getColumnArray 注释如实说明"会创建临时数组"（§3）');
+    } else {
+        bad('getColumnArray 缺少"非零拷贝"说明');
+    }
+    if (/取整列（Float64Array 视图，零拷贝）/.test(store) === false) {
+        ok('已删除 getColumn 的"零拷贝"错误注释');
+    } else {
+        bad('仍存在 getColumn 的"零拷贝"错误注释');
+    }
+    if (store.indexOf('getColumn: getColumn,') >= 0 && store.indexOf('@deprecated') >= 0) {
+        ok('getColumn 保留为 getColumnArray 的废弃别名（兼容不破坏）');
+    } else {
+        bad('getColumn 别名缺失');
+    }
+
+    // 9.2 §4：HourView 惰性取值 + ColumnView / getHourObject 双模式
+    if (store.indexOf('惰性 getter') >= 0 && store.indexOf('Object.defineProperty(row') >= 0) {
+        ok('HourView 行对象为惰性 getter（消除每小时 11 列全量写入，§4）');
+    } else {
+        bad('HourView 未惰性化');
+    }
+    for (const api of ['createColumnView', 'getHourObject']) {
+        if (store.indexOf(api + ':') >= 0) ok('已提供 ' + api + '（§4）');
+        else bad('缺少 ' + api);
+    }
+
+    // 9.3 §5：概览图单次遍历，禁止 7 次 getColumnArray 调用
+    const overviewBlock = store.slice(store.indexOf('getOverviewView(result'),
+        store.indexOf('getRangeView(result'));
+    if (overviewBlock.indexOf('单次遍历') >= 0
+        && /getColumnArray\s*\(/.test(overviewBlock) === false) {
+        ok('概览图改为单次遍历提取 7 列极值（不再 7 次复制 + 7 次扫描，§5）');
+    } else {
+        bad('概览图仍在做多次整列复制');
+    }
+
+    // 9.4 §9 / §10 / §36：SimulationKey 体系
+    for (const api of ['SIMULATION_ENGINE_VERSION', 'createSimulationKey', 'simulationKeyOf',
+        'createInputVersionFromRows']) {
+        if (store.indexOf(api) >= 0) ok('已提供 ' + api);
+        else bad('缺少 ' + api);
+    }
+    if (/SIMULATION_ENGINE_VERSION = '2\.3\.1'/.test(simEng)) ok('仿真算法版本号已定义（§36）');
+    else bad('simulation-engine.js 缺少算法版本号');
+    if (engine.indexOf('simulationKeyFor') >= 0 && engine.indexOf('cache.set(simKey') >= 0) {
+        ok('优化评价缓存改用 simulationKey（§13）');
+    } else {
+        bad('优化评价缓存未使用 simulationKey');
+    }
+
+    // 9.5 §34：缓存清理接口
+    for (const api of ['clearSimulationCache', 'clearChartCache', 'clearOptimizationCache', 'clearAllCaches']) {
+        if (store.indexOf('function ' + api) >= 0) ok('已提供 ' + api + '（§34）');
+        else bad('缺少清理接口 ' + api);
+    }
+    if (app.indexOf('createInputVersionFromRows') >= 0 && app.indexOf('clearAllCaches()') >= 0) {
+        ok('输入数据加载时生成版本号并使全部缓存失效（§35）');
+    } else {
+        bad('输入数据版本化/缓存失效缺失');
+    }
+
+    // 9.6 §20 / §21：性能计时器与长任务检测
+    if (utils.indexOf('PerfTimer') >= 0 && utils.indexOf('enabled: false') >= 0) {
+        ok('PerformanceTimer 已提供且默认关闭（§20）');
+    } else {
+        bad('PerformanceTimer 缺失或默认开启');
+    }
+    if (app.indexOf('PerformanceObserver') >= 0 && app.indexOf('Long Task detected') >= 0) {
+        ok('长任务检测已接入（>50ms 记录，§21）');
+    } else {
+        bad('长任务检测缺失');
+    }
+
+    // 9.7 §28：窗口 resize 防抖
+    if (app.indexOf("addEventListener('resize'") >= 0 && app.indexOf('resizePending') >= 0) {
+        ok('窗口 resize 经 rAF 防抖后 resize 图表（§28）');
+    } else {
+        bad('缺少 resize 防抖');
+    }
+
+    // 9.8 §27：每个 init* 函数在文件中恰好出现 2 次（1 次定义 + 1 次调用），
+    //          多于 2 次即存在重复绑定 / 重复初始化风险
+    const initNames = (app.match(/function (init\w+)\(/g) || [])
+        .map(m => m.replace(/^function /, '').replace(/\($/, ''));
+    const multiBound = initNames.filter(n =>
+        (app.match(new RegExp('\\b' + n + '\\(', 'g')) || []).length !== 2);
+    if (initNames.length > 0 && multiBound.length === 0) {
+        ok('每个 init* 函数均只绑定一次事件（无重复绑定风险，§27）', initNames.join(', '));
+    } else {
+        bad('存在重复定义/调用的 init* 函数', multiBound.join(', ') || '未找到 init 函数');
+    }
+
+    // 9.9 §19：基准脚本存在
+    if (fs.existsSync(path.join(ROOT, 'tests', 'performance-benchmark.js'))) {
+        ok('性能基准脚本已提供（tests/performance-benchmark.js，§19）');
+    } else {
+        bad('缺少性能基准脚本');
+    }
+})();
+
+// ---------------------------------------------------------------------------
+section('10. 检查汇总');
 lines.push('  PASS：' + pass + ' 项');
 lines.push('  FAIL：' + fail + ' 项');
 lines.push('  结论：' + (fail === 0 ? '全部通过 ✅' : '存在失败项 ❌'));

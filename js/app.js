@@ -122,6 +122,16 @@
                 fileInfo.style.color = 'var(--accent-green)';
 
                 log(`成功读取 ${AppState.inputData.length} 小时光伏/风电数据`, 'success');
+
+                // V2.3.1（任务书 §9 / §35）：输入数据版本在加载时生成一次并复用，
+                // 绝不在每次生成 simulationKey 时重复哈希 8760 数据。
+                // 换数据 → inputVersion 变化 → simulationKey / 图表缓存全部失效。
+                AppState.inputVersion = ResultDataStore.createInputVersionFromRows(AppState.inputData, {
+                    name: file.name, size: file.size,
+                });
+                ResultDataStore.clearAllCaches();
+                log(`输入数据版本 ${AppState.inputVersion}，已使全部缓存失效`, 'info');
+
                 setStatus('数据已加载，可以开始仿真');
             } catch (err) {
                 document.getElementById('fileInfo').textContent = `❌ 读取失败: ${err.message}`;
@@ -404,6 +414,7 @@
                 ratioData: simResult.ratioData,
                 sums: simResult.sums,
                 filename: simResult.filename,
+                inputVersion: AppState.inputVersion,
             });
             ResultDataStore.SimulationResultCache.put(simResult._store);
         }
@@ -441,6 +452,10 @@
      * @param {number} index AppState.simulationResults 的下标
      */
     function displaySimulationTable(index) {
+        return Utils.PerfTimer.measure('Table.render', () => displaySimulationTableInner(index));
+    }
+
+    function displaySimulationTableInner(index) {
         const simResult = AppState.simulationResults[index];
         if (!simResult) return;
         if (typeof ResultDataStore === 'undefined') {
@@ -635,6 +650,10 @@
     }
 
     function updateChart() {
+        return Utils.PerfTimer.measure('Chart.render', () => updateChartInner());
+    }
+
+    function updateChartInner() {
         const chartContainer = document.getElementById('chartContainer');
         const schemeIdx = parseInt(document.getElementById('chartSchemeSelect').value);
         const chartType = document.getElementById('chartTypeSelect').value;
@@ -733,11 +752,15 @@
         if (isNaN(idx)) return;
 
         const result = AppState.simulationResults[idx];
-        // V2.3：导出确实需要对象数组，此处显式物化一次（仅导出场景，任务书 §5）
-        const hourlyData = ResultDataStore.materialize(ensureResultStore(result));
+        // V2.3.1（任务书 §30）：导出确实需要对象数组，此处显式物化一次（仅导出场景）；
+        // 总和行改用年度摘要，避免导出阶段再做 10 列 × 8760 次属性遍历
+        const store = ensureResultStore(result);
+        const hourlyData = ResultDataStore.materialize(store);
+        const totals = ResultDataStore.getAnnualSummary(store).byLabel;
 
         const resultData = {
             hourlyData,
+            totals,
             systemVars: result.systemVars,
             ratioData: result.ratioData
         };
@@ -1261,7 +1284,7 @@
 
     function readOptWeights() {
         return {
-            firr: Utils.toNum(optEl('optWeightFirr').value, 40) / 100,
+            eirr: Utils.toNum(optEl('optWeightEirr').value, 40) / 100,
             lcoh: Utils.toNum(optEl('optWeightLcoh').value, 35) / 100,
             curtailmentRate: Utils.toNum(optEl('optWeightCurtail').value, 25) / 100,
         };
@@ -1283,7 +1306,7 @@
     /** 权重合计实时显示 */
     function updateOptWeightSum() {
         const w = readOptWeights();
-        const sum = (w.firr + w.lcoh + w.curtailmentRate) * 100;
+        const sum = (w.eirr + w.lcoh + w.curtailmentRate) * 100;
         const el = optEl('optWeightSum');
         el.textContent = Math.round(sum * 100) / 100 + '%';
         el.style.color = Math.abs(sum - 100) < 1e-6 ? 'var(--accent-cyan)' : 'var(--accent-yellow)';
@@ -1391,6 +1414,9 @@
             prices: getEstimatePrices(),
             financeParams: getFinanceParams(),
             lcohDiscountRate: Utils.toNum(optEl('optLcohDiscount').value, 5.0),
+            // V2.3.1（任务书 §9 / §35）：输入数据版本参与 simulationKey，
+            // 换数据后旧评价缓存自动失效
+            inputVersion: AppState.inputVersion,
         };
     }
 
@@ -1404,7 +1430,7 @@
                 if (el) el.addEventListener('input', updateOptVarPreview);
             }
         }
-        ['optWeightFirr', 'optWeightLcoh', 'optWeightCurtail'].forEach(id => {
+        ['optWeightEirr', 'optWeightLcoh', 'optWeightCurtail'].forEach(id => {
             const el = optEl(id);
             if (el) el.addEventListener('input', updateOptWeightSum);
         });
@@ -1660,6 +1686,7 @@
                     prices: ctx.prices,
                     financeParams: ctx.financeParams,
                     lcohDiscountRate: ctx.lcohDiscountRate,
+                    inputVersion: ctx.inputVersion,
                 },
             },
         });
@@ -1794,7 +1821,7 @@
             evaluatedCount: snap.evaluated,
             feasibleCount: snap.feasibleCount,
             paretoCount: snap.paretoCount,
-            bestFIRR: snap.bestFIRR,
+            bestEirr: snap.bestEirr,
             bestLCOH: snap.bestLCOH,
             bestCurtailmentRate: snap.bestCurtailmentRate,
         };
@@ -1813,7 +1840,7 @@
             `缓存命中 <b>${optInt(snap.cacheHits)}</b>`,
             `可行方案 <b>${optInt(snap.feasibleCount)}</b>`,
             `Pareto方案 <b>${optInt(snap.paretoCount)}</b>`,
-            `当前最佳FIRR <b>${optPct(snap.bestFIRR)}</b>`,
+            `当前最佳EIRR <b>${optPct(snap.bestEirr)}</b>`,
             `当前最低LCOH <b>${optNum(snap.bestLCOH, 2)} 元/kg</b>`,
             `当前最低弃电率 <b>${optPct(snap.bestCurtailmentRate === null ? null : snap.bestCurtailmentRate * 100)}</b>`,
             `耗时 <b>${optNum(snap.elapsedTime, 1)} s</b>`,
@@ -1916,8 +1943,8 @@
         const note = `<div class="opt-note">
             <b>优化说明：</b>本优化结果是在<b>当前风光 8760 小时数据、设备参数、投资参数、电价、氢价、财务参数及固定运行策略</b>条件下
             得到的 Pareto 最优解，<b>不代表脱离边界条件的绝对最优工程方案</b>。
-            目标函数为：最大化 FIRR、最小化 LCOH（全生命周期折现口径，折现率 ${optNum((OptState.result.config.lcoh || {}).discountRate, 2)}%）、最小化新能源弃电率；
-            综合推荐方案由权重（FIRR ${optNum(OptState.result.config.recommendationWeights.firr * 100, 0)}% /
+            目标函数为：最大化资本金内部收益率（EIRR）、最小化 LCOH（全生命周期折现口径，折现率 ${optNum((OptState.result.config.lcoh || {}).discountRate, 2)}%）、最小化新能源弃电率；
+            综合推荐方案由权重（EIRR ${optNum(OptState.result.config.recommendationWeights.eirr * 100, 0)}% /
             LCOH ${optNum(OptState.result.config.recommendationWeights.lcoh * 100, 0)}% /
             弃电率 ${optNum(OptState.result.config.recommendationWeights.curtailmentRate * 100, 0)}%）
             在 Pareto 前沿内部择优得到，权重不参与 NSGA-II 适应度。
@@ -1942,7 +1969,7 @@
                 <div class="opt-card-row"><span>储能</span><b>${optNum(sc.storagePower, 0)} MW / ${optNum(sc.storageDuration, 0)} h</b></div>
                 <div class="opt-card-row"><span>电解槽</span><b>${optNum(sc.electrolyzerCapacity, 0)} MW</b></div>
                 <div class="opt-card-row"><span>年制氢量</span><b>${optInt(te.annualHydrogenTon)} t/a</b></div>
-                <div class="opt-card-row"><span>FIRR</span><b>${optPct(ec.FIRR)}</b></div>
+                <div class="opt-card-row"><span>资本金收益率 EIRR</span><b>${optPct(ec.EIRR)}</b></div>
                 <div class="opt-card-row"><span>LCOH</span><b>${optNum(ec.LCOH, 2)} 元/kg</b></div>
                 <div class="opt-card-row"><span>弃电率</span><b>${optPct(te.curtailmentRate * 100)}</b></div>
                 <div class="opt-card-row"><span>总投资</span><b>${optNum(ec.totalInvestment / 10000, 3)} 亿元</b></div>
@@ -1955,7 +1982,7 @@
 
         const cards = `<div class="opt-card-grid">
             ${card('🏆 方案D 综合推荐', 'is-recommended', rep.recommended)}
-            ${card('💰 方案A 经济最优（FIRR最高）', 'is-economic', rep.economicBest)}
+            ${card('💰 方案A 经济最优（EIRR最高）', 'is-economic', rep.economicBest)}
             ${card('🧪 方案B 氢成本最优（LCOH最低）', 'is-h2cost', rep.hydrogenCostBest)}
             ${card('🌿 方案C 消纳最优（弃电率最低）', 'is-curtail', rep.curtailmentBest)}
         </div>`;
@@ -1990,15 +2017,15 @@
                 return `<tr><td>${label}（${unit}）</td><td>${optNum(b, digits)}</td><td>${optNum(c, digits)}</td><td class="${cls}">${dtxt}</td></tr>`;
             }).join('');
 
-            const df = (base.economic.FIRR !== null && rep.recommended.economic.FIRR !== null)
-                ? rep.recommended.economic.FIRR - base.economic.FIRR : null;
+            const de = (base.economic.EIRR !== null && rep.recommended.economic.EIRR !== null)
+                ? rep.recommended.economic.EIRR - base.economic.EIRR : null;
             const dl = (isFinite(base.economic.LCOH) && isFinite(rep.recommended.economic.LCOH))
                 ? rep.recommended.economic.LCOH - base.economic.LCOH : null;
             const dc = (rep.recommended.technical.curtailmentRate - base.technical.curtailmentRate) * 100;
 
             compare = `<div class="opt-note">
                     <b>相较基准方案（Baseline）：</b>
-                    FIRR ${df === null ? '—' : (df >= 0 ? '提高 +' : '降低 ') + df.toFixed(2) + ' 个百分点'}；
+                    EIRR ${de === null ? '—' : (de >= 0 ? '提高 +' : '降低 ') + de.toFixed(2) + ' 个百分点'}；
                     LCOH ${dl === null ? '—' : (dl <= 0 ? '降低 ' : '提高 +') + dl.toFixed(2) + ' 元/kg'}；
                     弃电率 ${(dc <= 0 ? '降低 ' : '提高 +') + dc.toFixed(2) + ' 个百分点'}。
                 </div>
@@ -2021,13 +2048,13 @@
 
         const filter = optEl('optParetoFilter').value;
         if (filter === 'top20') list = list.slice(0, 20);
-        else if (filter === 'economic') list = list.filter(s => s.economic.FIRR !== null && isFinite(s.economic.FIRR) && s.economic.FIRR >= 0);
+        else if (filter === 'economic') list = list.filter(s => s.economic.EIRR !== null && isFinite(s.economic.EIRR) && s.economic.EIRR >= 0);
 
         const sort = optEl('optParetoSort').value;
         const num = v => (v === null || v === undefined || !isFinite(Number(v))) ? (sort === 'lcoh' || sort === 'curtailment' || sort === 'investment' ? Infinity : -Infinity) : Number(v);
         const cmp = {
             score: (a, b) => num(b.score) - num(a.score),
-            firr: (a, b) => num(b.economic.FIRR) - num(a.economic.FIRR),
+            eirr: (a, b) => num(b.economic.EIRR) - num(a.economic.EIRR),
             lcoh: (a, b) => num(a.economic.LCOH) - num(b.economic.LCOH),
             curtailment: (a, b) => num(a.technical.curtailmentRate) - num(b.technical.curtailmentRate),
             hydrogen: (a, b) => num(b.technical.annualHydrogenKg) - num(a.technical.annualHydrogenKg),
@@ -2061,7 +2088,7 @@
             ['外购电(%)', s => optNum(s.technical.gridImportRatio * 100, 2)],
             ['绿电(%)', s => optNum(s.technical.greenHydrogenRatio * 100, 2)],
             ['LCOH(元/kg)', s => optNum(s.economic.LCOH, 2)],
-            ['FIRR(%)', s => optNum(s.economic.FIRR, 2)],
+            ['EIRR(%)', s => optNum(s.economic.EIRR, 2)],
             ['总投资(亿元)', s => optNum(s.economic.totalInvestment / 10000, 3)],
             ['综合得分', s => s.score === null || s.score === undefined ? '—' : optNum(s.score * 100, 2)],
         ];
@@ -2089,14 +2116,14 @@
         }
 
         let html = '<thead><tr><th>Generation</th><th>Population（累计评价）</th><th>FeasibleCount</th>' +
-                   '<th>ParetoCount</th><th>BestFIRR</th><th>BestLCOH</th><th>BestCurtailment</th></tr></thead><tbody>';
+                   '<th>ParetoCount</th><th>BestEIRR</th><th>BestLCOH</th><th>BestCurtailment</th></tr></thead><tbody>';
         for (const h of history) {
             html += `<tr>
                 <td>${h.generation}</td>
                 <td>${optInt(h.evaluatedCount)}</td>
                 <td>${optInt(h.feasibleCount)}</td>
                 <td>${optInt(h.paretoCount)}</td>
-                <td>${optPct(h.bestFIRR)}</td>
+                <td>${optPct(h.bestEirr)}</td>
                 <td>${optNum(h.bestLCOH, 2)}</td>
                 <td>${h.bestCurtailmentRate === null ? '—' : optPct(h.bestCurtailmentRate * 100)}</td>
             </tr>`;
@@ -2111,7 +2138,7 @@
         if (OptState.paretoChart) { try { OptState.paretoChart.dispose(); } catch (e) { } OptState.paretoChart = null; }
         for (const c of OptState.convCharts) { try { c.dispose(); } catch (e) { } }
         OptState.convCharts = [];
-        ['optParetoChart', 'optConvFirr', 'optConvLcoh', 'optConvCurtail'].forEach(id => {
+        ['optParetoChart', 'optConvEirr', 'optConvLcoh', 'optConvCurtail'].forEach(id => {
             const el = optEl(id);
             if (el) el.innerHTML = el.id === 'optParetoChart'
                 ? '<div class="chart-placeholder">优化完成后在此处查看 Pareto 前沿</div>' : '';
@@ -2162,7 +2189,7 @@
         if (!OptState.result) return;
         const history = OptState.result.history || [];
         const defs = [
-            ['optConvFirr', 'firr'],
+            ['optConvEirr', 'eirr'],
             ['optConvLcoh', 'lcoh'],
             ['optConvCurtail', 'curtailment'],
         ];
@@ -2611,7 +2638,54 @@
             __injectSimulationResults: (results) => onSimulationComplete(results),
         };
 
-        log('多能互补风光储氢分析软件 WEB-V2.3 已就绪（前端性能与数据流优化）', 'success');
+        // =====================================================================
+        // V2.3.1 性能治理（任务书 §20 / §21 / §28）
+        // =====================================================================
+
+        // 性能计时开关：默认关闭；URL 带 ?perf=1 或控制台置 DEBUG_PERFORMANCE 时开启
+        const wantsPerf = (function () {
+            try {
+                if (window.DEBUG_PERFORMANCE === true) return true;
+                return /([?&])perf=1\b/.test(window.location.search || '');
+            } catch (e) { return false; }
+        })();
+        if (wantsPerf) {
+            Utils.PerfTimer.enable();
+            log('[PERF] 性能计时已开启（DEBUG_PERFORMANCE）', 'warn');
+
+            // 长任务检测（§21）：>50ms 记录一条；由 PerfTimer.enabled 控制生命周期，
+            // 不做永久高频输出
+            if (typeof PerformanceObserver !== 'undefined') {
+                try {
+                    const po = new PerformanceObserver((list) => {
+                        const entries = list.getEntries() || [];
+                        for (const e of entries) {
+                            if (e.duration >= 50) {
+                                log('Long Task detected: duration = ' + e.duration.toFixed(1) + ' ms', 'warn');
+                            }
+                        }
+                    });
+                    po.observe({ entryTypes: ['longtask'] });
+                } catch (e) { /* 浏览器不支持 longtask 条目，忽略 */ }
+            }
+        }
+
+        // 窗口缩放 → rAF 防抖后 resize（§28）：避免拖动过程中高频触发 chart.resize()
+        let resizePending = false;
+        window.addEventListener('resize', () => {
+            if (resizePending) return;
+            resizePending = true;
+            requestAnimationFrame(() => {
+                resizePending = false;
+                if (AppState.currentChart && !AppState.currentChart.isDisposed()) AppState.currentChart.resize();
+                if (OptState.paretoChart && !OptState.paretoChart.isDisposed()) OptState.paretoChart.resize();
+                for (const c of OptState.convCharts) {
+                    if (c && !c.isDisposed()) c.resize();
+                }
+            });
+        }, { passive: true });
+
+        log('多能互补风光储氢分析软件 WEB-V2.3.1 已就绪（数据访问层与仿真引擎性能审计版）', 'success');
         log('V2.3 架构：计算层（Float64Array）→ 结果层（ResultDataStore）→ 显示层（图表/表格/Excel 按需读取）');
         log('　· 8760 小时数据只计算并保存一份；逐时表采用虚拟滚动，DOM 只保留可视区间');
         log('　· 图表显示数据允许降采样（≤1500 点），指标计算始终使用全分辨率');

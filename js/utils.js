@@ -115,5 +115,65 @@ const Utils = {
     }
 };
 
+/**
+ * ============================================================================
+ * 统一性能计时器（V2.3.1 任务书 §20）
+ * ============================================================================
+ *
+ * 用法：
+ *   PerfTimer.start('Simulation');  ...耗时操作...;  PerfTimer.end('Simulation');
+ *   PerfTimer.measure('Summary', () => DataSummary.generateSummary(...));
+ *
+ * 输出：
+ *   [PERF] Simulation: 8.2 ms
+ *   [PERF] Table.render: 120.3 ms  (long task)      —— 超过 50ms 单独标注
+ *
+ * 开关：生产环境默认关闭（enabled = false），不产生任何输出与计时开销。
+ * 打开方式（任一）：
+ *   · URL 加 ?perf=1
+ *   · 控制台执行 Utils.PerfTimer.enabled = true
+ */
+const PerfTimer = {
+    /** 默认关闭（任务书 §20：生产环境可通过 DEBUG_PERFORMANCE 控制） */
+    enabled: false,
+    _marks: {},
+
+    /** 开启（返回 this 便于链式） */
+    enable() { this.enabled = true; return this; },
+    disable() { this.enabled = false; return this; },
+
+    start(name) {
+        if (!this.enabled) return;
+        this._marks[name] = performance.now();
+    },
+
+    end(name) {
+        if (!this.enabled) return;
+        const t0 = this._marks[name];
+        if (t0 === undefined) return;
+        delete this._marks[name];
+        this._emit(name, performance.now() - t0);
+    },
+
+    /** 同步测量：无论开关状态都执行 fn，仅在开启时输出 */
+    measure(name, fn) {
+        if (!this.enabled) return fn();
+        const t0 = performance.now();
+        try {
+            return fn();
+        } finally {
+            this._emit(name, performance.now() - t0);
+        }
+    },
+
+    _emit(name, ms) {
+        const tag = ms >= 50 ? '  (long task)' : '';
+        const fn = ms >= 50 ? console.warn : console.log;
+        fn.call(console, '[PERF] ' + name + ': ' + ms.toFixed(1) + ' ms' + tag);
+    },
+};
+
+Utils.PerfTimer = PerfTimer;
+
 // 导出给其他模块使用（浏览器主线程 window / Web Worker self 通用）
 self.Utils = Utils;

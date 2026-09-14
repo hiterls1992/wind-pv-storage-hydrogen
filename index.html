@@ -12,7 +12,7 @@
         <div class="header-left">
             <span class="logo">⚡</span>
             <h1>多能互补系统仿真计算平台</h1>
-            <span class="version">WEB-V2.3</span>
+            <span class="version">WEB-V2.3.1</span>
             <span style="font-size:11px;color:#5a6a8a;letter-spacing:0;margin-left:6px">作者：hiterls1992</span>
         </div>
         <div class="header-right">
@@ -599,7 +599,7 @@
                     <div class="param-section">
                         <h3>④ 综合推荐权重</h3>
                         <div class="param-grid">
-                            <div class="param-row"><label>FIRR 权重 (%)</label><input type="number" id="optWeightFirr" value="40" step="5"></div>
+                            <div class="param-row"><label>EIRR（资本金）权重 (%)</label><input type="number" id="optWeightEirr" value="40" step="5"></div>
                             <div class="param-row"><label>LCOH 权重 (%)</label><input type="number" id="optWeightLcoh" value="35" step="5"></div>
                             <div class="param-row"><label>弃电率 权重 (%)</label><input type="number" id="optWeightCurtail" value="25" step="5"></div>
                             <div class="param-row"><label>权重合计</label><span class="opt-weight-sum" id="optWeightSum">100%</span></div>
@@ -674,7 +674,7 @@
                             <label class="opt-inline-label">排序：</label>
                             <select id="optParetoSort" class="scheme-select">
                                 <option value="score">综合得分（高→低）</option>
-                                <option value="firr">FIRR（高→低）</option>
+                                <option value="eirr">资本金收益率 EIRR（高→低）</option>
                                 <option value="lcoh">LCOH（低→高）</option>
                                 <option value="curtailment">弃电率（低→高）</option>
                                 <option value="hydrogen">年制氢量（高→低）</option>
@@ -684,7 +684,7 @@
                             <select id="optParetoFilter" class="scheme-select">
                                 <option value="all">全部 Pareto 方案</option>
                                 <option value="top20">前 20 个</option>
-                                <option value="economic">FIRR ≥ 0</option>
+                                <option value="economic">EIRR ≥ 0</option>
                             </select>
                             <span class="hint" id="optParetoCount">—</span>
                         </div>
@@ -701,22 +701,22 @@
                     <div class="sub-tab-panel" id="subtab-opt-charts">
                         <div class="chart-controls">
                             <select id="optParetoChartType" class="scheme-select">
-                                <option value="firr-lcoh">X：LCOH（元/kg） — Y：FIRR（%）</option>
+                                <option value="eirr-lcoh">X：LCOH（元/kg） — Y：资本金收益率 EIRR（%）</option>
                                 <option value="lcoh-curtail">X：LCOH（元/kg） — Y：弃电率（%）</option>
-                                <option value="scale-firr">X：风电+光伏装机（MW） — Y：FIRR（%）</option>
+                                <option value="scale-eirr">X：风电+光伏装机（MW） — Y：资本金收益率 EIRR（%）</option>
                             </select>
                             <button class="btn btn-sm btn-outline" id="btnExportOptChartPng" disabled>📷 导出当前图PNG</button>
                         </div>
                         <div class="chart-container opt-chart-box" id="optParetoChart">
                             <div class="chart-placeholder">优化完成后在此处查看 Pareto 前沿</div>
                         </div>
-                        <p class="hint">点击散点可查看对应方案的详细技术经济指标（含风电/光伏/储能/电解槽/制氢量/弃电率/LCOH/FIRR）。</p>
+                        <p class="hint">点击散点可查看对应方案的详细技术经济指标（含风电/光伏/储能/电解槽/制氢量/弃电率/LCOH/EIRR）。</p>
                     </div>
 
                     <!-- 收敛曲线 -->
                     <div class="sub-tab-panel" id="subtab-opt-convergence">
                         <div class="opt-scroll">
-                            <div class="opt-chart-box" id="optConvFirr" style="height:220px"></div>
+                            <div class="opt-chart-box" id="optConvEirr" style="height:220px"></div>
                             <div class="opt-chart-box" id="optConvLcoh" style="height:220px"></div>
                             <div class="opt-chart-box" id="optConvCurtail" style="height:220px"></div>
                         </div>

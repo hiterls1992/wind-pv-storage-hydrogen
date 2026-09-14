@@ -258,3 +258,14 @@ function runSingleSimulation(pvData, windData, scheme, simulationConfig, legacyD
 
 // 导出到全局（浏览器主线程 window / Web Worker self 通用）
 self.runSingleSimulation = runSingleSimulation;
+
+/**
+ * 仿真算法版本（V2.3.1 任务书 §36）。
+ *
+ * 参与 SimulationKey 的构成：以后只要仿真公式 / 策略发生变化（哪怕 Scheme 不变），
+ * 递增该版本号即可让所有旧缓存（OptimizationResultCache / ChartDataCache /
+ * SimulationResultCache）自动失效，避免旧缓存污染新结果。
+ *
+ * 当前 2.3.1 = V2.3.1 性能微优化版（未改变任何公式，仅消除冗余计算与对象分配）。
+ */
+self.SIMULATION_ENGINE_VERSION = '2.3.1';

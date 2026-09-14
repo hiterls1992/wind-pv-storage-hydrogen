@@ -1,0 +1,22 @@
+{
+  "date": "2026-09-12T22:29:56.235Z",
+  "node": "v22.12.0",
+  "results": {
+    "simulationTime": 3.1268,
+    "summaryTime": 0.0112,
+    "financeTime": 0.1805,
+    "chartDataCold": 0.9983,
+    "chartDataWarm": 0.0041,
+    "chartDataColumn": 1.2935,
+    "overviewAllocArrays": 7,
+    "overviewAllocBytes": 490560,
+    "tableRenderTime": 14.9622,
+    "tableRenderMedian": 12.904,
+    "tableRows": 39,
+    "tableNodes": 548,
+    "tableScrollTime": 0.0362,
+    "optimizationTime": 113.7794,
+    "evaluationCount": 134,
+    "cacheHitRate": 0.3936651583710407
+  }
+}

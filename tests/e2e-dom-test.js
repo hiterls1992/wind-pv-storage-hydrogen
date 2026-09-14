@@ -105,7 +105,7 @@ const SCRIPT_ORDER = [
 
     const logText = () => doc.getElementById('logContent').textContent || '';
 
-    const inited = await waitFor(() => /WEB-V2\.2 已就绪/.test(logText()), 20000);
+    const inited = await waitFor(() => /WEB-V2\.3(\.1)? 已就绪/.test(logText()), 20000);
     if (inited) {
         ok('页面初始化完成并输出版本号 V2.2');
     } else {
@@ -227,12 +227,12 @@ const SCRIPT_ORDER = [
     // 权重合计（须为 JS 计算值）
     if (doc.getElementById('optWeightSum').textContent === '100%') ok('综合推荐权重合计校验通过（100%）');
     else bad('权重合计显示异常', doc.getElementById('optWeightSum').textContent);
-    doc.getElementById('optWeightFirr').value = '50';
-    doc.getElementById('optWeightFirr').dispatchEvent(new window.Event('input'));
+    doc.getElementById('optWeightEirr').value = '50';
+    doc.getElementById('optWeightEirr').dispatchEvent(new window.Event('input'));
     if (doc.getElementById('optWeightSum').textContent === '110%') ok('权重合计随输入实时更新', '改为 50/35/25 → 110%');
     else bad('权重合计未实时更新', doc.getElementById('optWeightSum').textContent);
-    doc.getElementById('optWeightFirr').value = '40';
-    doc.getElementById('optWeightFirr').dispatchEvent(new window.Event('input'));
+    doc.getElementById('optWeightEirr').value = '40';
+    doc.getElementById('optWeightEirr').dispatchEvent(new window.Event('input'));
 
     // -----------------------------------------------------------------------
     section('2. 加载 input.xlsx（模拟文件选择）');
@@ -354,7 +354,7 @@ const SCRIPT_ORDER = [
             ok('方案详情面板已渲染（容量 / 技术 / 经济 / 约束）');
         } else bad('方案详情渲染不完整');
 
-        if (/FILTR|FIRR/.test(detail) && /LCOH（折现口径）/.test(detail)) ok('方案详情包含 FIRR 与 LCOH 口径说明');
+        if (/FIRR/.test(detail) && /LCOH（折现口径）/.test(detail)) ok('方案详情包含 FIRR 与 LCOH 口径说明');
         else bad('方案详情缺少关键指标');
         if (/EIRR（资本金）/.test(detail)) ok('方案详情区分 FIRR 与 EIRR');
         else bad('方案详情未区分 FIRR/EIRR');

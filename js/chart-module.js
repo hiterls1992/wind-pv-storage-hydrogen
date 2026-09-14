@@ -482,17 +482,17 @@ const ChartModule = {
 
     /** Pareto 图坐标定义 */
     PARETO_AXES: {
-        'firr-lcoh': {
-            xName: 'LCOH (元/kg)', yName: 'FIRR (%)',
-            x: s => s.economic.LCOH, y: s => s.economic.FIRR,
+        'eirr-lcoh': {
+            xName: 'LCOH (元/kg)', yName: '资本金收益率 EIRR (%)',
+            x: s => s.economic.LCOH, y: s => s.economic.EIRR,
         },
         'lcoh-curtail': {
             xName: 'LCOH (元/kg)', yName: '弃电率 (%)',
             x: s => s.economic.LCOH, y: s => s.technical.curtailmentRate * 100,
         },
-        'scale-firr': {
-            xName: '风电+光伏装机 (MW)', yName: 'FIRR (%)',
-            x: s => s.scheme.windCapacity + s.scheme.pvCapacity, y: s => s.economic.FIRR,
+        'scale-eirr': {
+            xName: '风电+光伏装机 (MW)', yName: '资本金收益率 EIRR (%)',
+            x: s => s.scheme.windCapacity + s.scheme.pvCapacity, y: s => s.economic.EIRR,
         },
     },
 
@@ -500,7 +500,7 @@ const ChartModule = {
      * Pareto 前沿散点图（三类视图共用）
      * @param {HTMLElement} container
      * @param {Array}  solutions - Pareto 方案数组（统一评价结果）
-     * @param {string} kind - 'firr-lcoh' | 'lcoh-curtail' | 'scale-firr'
+     * @param {string} kind - 'eirr-lcoh' | 'lcoh-curtail' | 'scale-eirr'
      * @param {Object} opts - { forExport, onSelect(solution), repKeys:{recommended,economicBest,hydrogenCostBest,curtailmentBest}, selectedKey }
      */
     renderParetoScatter(container, solutions, kind, opts) {
@@ -509,7 +509,7 @@ const ChartModule = {
         const t = this._theme(forExport);
         const chart = this._initChart(container, forExport);
         const ax = this._axisStyle(forExport);
-        const axis = this.PARETO_AXES[kind] || this.PARETO_AXES['firr-lcoh'];
+        const axis = this.PARETO_AXES[kind] || this.PARETO_AXES['eirr-lcoh'];
         const rep = o.repKeys || {};
 
         const repDefs = [
@@ -594,7 +594,7 @@ const ChartModule = {
                         `年制氢量 ${fmt(s.technical.annualHydrogenTon, 0)} t/a`,
                         `弃电率 ${fmt(s.technical.curtailmentRate * 100, 2)} %`,
                         `LCOH ${fmt(s.economic.LCOH, 2)} 元/kg`,
-                        `FIRR ${fmt(s.economic.FIRR, 2)} %`,
+                        `EIRR（资本金） ${fmt(s.economic.EIRR, 2)} %`,
                         `<span style="color:#8b949e">点击查看方案详情</span>`,
                     ].join('<br/>');
                 },
@@ -621,7 +621,7 @@ const ChartModule = {
      * 优化收敛曲线（Generation vs 各代最优指标）
      * @param {HTMLElement} container
      * @param {Array}  history - 引擎返回的 history 数组
-     * @param {string} metric - 'firr' | 'lcoh' | 'curtailment'
+     * @param {string} metric - 'eirr' | 'lcoh' | 'curtailment'
      * @param {boolean} forExport
      */
     renderConvergenceChart(container, history, metric, forExport = false) {
@@ -630,11 +630,11 @@ const ChartModule = {
         const ax = this._axisStyle(forExport);
 
         const meta = {
-            firr: { title: '收敛曲线：Generation vs Best FIRR', name: 'Best FIRR (%)', color: '#3fb950', get: h => h.bestFIRR },
+            eirr: { title: '收敛曲线：Generation vs Best EIRR（资本金）', name: 'Best EIRR (%)', color: '#3fb950', get: h => h.bestEirr },
             lcoh: { title: '收敛曲线：Generation vs Best LCOH', name: 'Best LCOH (元/kg)', color: '#58a6ff', get: h => h.bestLCOH },
             curtailment: { title: '收敛曲线：Generation vs Best Curtailment Rate', name: 'Best 弃电率 (%)', color: '#d29922', get: h => (h.bestCurtailmentRate === null ? null : h.bestCurtailmentRate * 100) },
         }[metric] || {
-            title: '收敛曲线', name: '指标', color: '#58a6ff', get: h => h.bestFIRR,
+            title: '收敛曲线', name: '指标', color: '#58a6ff', get: h => h.bestEirr,
         };
 
         const gens = (history || []).map(h => h.generation);

@@ -104,6 +104,94 @@
     }
 
     // =========================================================================
+    // 二.5 SimulationKey（V2.3.1 任务书 §9 / §10 / §36）
+    // =========================================================================
+    //
+    //   SchemeKey      = 方案容量身份（建多大）
+    //   SimulationKey  = Scheme + SimulationConfig + 输入数据版本 + 仿真算法版本
+    //
+    // 换气象数据 / 改制氢电耗 / 改储能效率 / 改上网约束 / 改仿真策略时，
+    // 即使 Scheme 不变也会得到新的 SimulationKey —— 旧缓存因此不会污染新结果。
+
+    /** 仿真算法版本（任务书 §36）：仿真公式发生变化时必须递增，使旧缓存自动失效 */
+    const SIMULATION_ENGINE_VERSION = '2.3.1';
+
+    /** FNV-1a 字符串哈希（用于 config 指纹；不扫描 8760 数据） */
+    function fnv1a(str) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < str.length; i++) {
+            h ^= str.charCodeAt(i);
+            h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        return ('0000000' + h.toString(16)).slice(-8);
+    }
+
+    /** 运行参数指纹（只哈希配置对象，代价 O(1)） */
+    function configFingerprint(cfg) {
+        if (!cfg) return 'none';
+        try { return fnv1a(JSON.stringify(cfg)); } catch (e) { return 'err'; }
+    }
+
+    /**
+     * 生成仿真键（任务书 §9）。
+     *
+     * @param {Object} opts { scheme, simulationConfig, inputVersion, schemeKey, engineVersion }
+     * @returns {string} 形如 "2.3.1|W200|PV360|B100|H2|EL160|cfg1a2b3c4d|input5f6e7d8c-8760"
+     */
+    function createSimulationKey(opts) {
+        const o = opts || {};
+        const schemePart = o.schemeKey ||
+            ((o.scheme && typeof ParameterManager !== 'undefined' && ParameterManager.schemeKey)
+                ? ParameterManager.schemeKey(o.scheme) : 'noscheme');
+        const cfgPart = configFingerprint(o.simulationConfig);
+        const inputPart = (o.inputVersion === undefined || o.inputVersion === null)
+            ? 'input-none' : String(o.inputVersion);
+        const enginePart = o.engineVersion || SIMULATION_ENGINE_VERSION;
+        return enginePart + '|' + schemePart + '|cfg' + cfgPart + '|' + inputPart;
+    }
+
+    /** 结果对象 → 仿真键（优先取结果自带的 simulationKey，缺则现场合成） */
+    function simulationKeyOf(result) {
+        if (!result) return '';
+        if (result.simulationKey) return result.simulationKey;
+        return createSimulationKey({
+            scheme: result.scheme,
+            simulationConfig: result.simulationConfig,
+            schemeKey: result.key,
+        });
+    }
+
+    /**
+     * 生成输入数据版本号（任务书 §9 / §35）。
+     *
+     * 在**输入数据加载时调用一次**并复用，严禁在每次生成 simulationKey 时重新哈希 8760 数据。
+     * 用 FNV-1a 逐元素混合浮点位模式，能可靠区分"数据真的变了"与"仅换个文件名"。
+     *
+     * @param {Array<{pv:number,wind:number}>} rows 解析后的逐时数据
+     * @param {Object} [meta] 附加元信息（文件名 / 大小等）
+     * @returns {string} 形如 "in-1a2b3c4d-8760"
+     */
+    function createInputVersionFromRows(rows, meta) {
+        const f = new Float64Array(1);
+        const u = new Uint32Array(f.buffer);
+        let h = 0x811c9dc5;
+        const mixU32 = function (v) {
+            h ^= v >>> 0;
+            h = Math.imul(h, 0x01000193) >>> 0;
+        };
+        const n = rows ? rows.length : 0;
+        for (let i = 0; i < n; i++) {
+            f[0] = rows[i].pv; mixU32(u[0]); mixU32(u[1]);
+            f[0] = rows[i].wind; mixU32(u[0]); mixU32(u[1]);
+        }
+        if (meta) {
+            const mh = fnv1a(JSON.stringify(meta));
+            for (let i = 0; i < mh.length; i++) mixU32(mh.charCodeAt(i));
+        }
+        return 'in-' + ('0000000' + h.toString(16)).slice(-8) + '-' + n;
+    }
+
+    // =========================================================================
     // 三、ResultDataStore：统一结果数据存储层（§4）
     // =========================================================================
 
@@ -140,6 +228,13 @@
             _monthlyByLabel: null,
         };
         rec.key = m.key || schemeKeyOf(rec);
+        // V2.3.1（任务书 §9）：结果记录自带 simulationKey，
+        // 供图表缓存与结果缓存正确区分"同方案不同运行参数/不同输入数据"
+        rec.simulationKey = m.simulationKey || createSimulationKey({
+            scheme: rec.scheme,
+            simulationConfig: rec.simulationConfig,
+            schemeKey: rec.key,
+        });
         return rec;
     }
 
@@ -175,10 +270,19 @@
     }
 
     /**
-     * 取整列（Float64Array 视图，零拷贝）。
-     * 返回的是 subarray 视图 —— **只读使用，禁止修改**。
+     * 取整列的**连续副本**。
+     *
+     * ⚠ 任务书 §3 指正：本函数【不是零拷贝】。
+     *   核心数据是 hour-major 布局（每小时 11 列连续存放），单列数据在内存中并不连续，
+     *   无法用 subarray() 取视图，因此这里必然创建一个长度 = hours 的临时 Float64Array
+     *   （8760 × 8B ≈ 70 KB）。
+     *
+     * 使用准则：
+     *   · 只在"确实需要连续数组"的场景调用（例如降采样定位极值）；
+     *   · 只需逐点读取时，请改用 getValue() 或 createColumnView()（零分配）；
+     *   · 调用方不得长期持有返回值。
      */
-    function getColumn(result, column) {
+    function getColumnArray(result, column) {
         const c = resolveColumn(column);
         if (!result || c < 0) return new Float64Array(0);
         const n = result.hours;
@@ -186,6 +290,15 @@
         const out = new Float64Array(n);
         for (let h = 0; h < n; h++) out[h] = raw[h * COL_COUNT + c];
         return out;
+    }
+
+    /**
+     * @deprecated V2.4 移除 —— 名称暗示"取列"却伴随整列复制，易被误读为零拷贝。
+     * 请改用语义明确的 getColumnArray()（开销相同）。
+     * TODO V2.4 REMOVE LEGACY
+     */
+    function getColumn(result, column) {
+        return getColumnArray(result, column);
     }
 
     /**
@@ -304,14 +417,15 @@
     const KEYS = COL_LABELS;
 
     function createHourView(result, indices) {
+        const raw = result ? result.results : null;
         const view = {
             /** 视图长度 */
             length: indices ? indices.length : getLength(result),
             /** 视图对应的真实小时序号（null 表示连续的 0..length-1） */
             indices: indices || null,
             result: result,
-            /** 复用的行对象（避免 8760 次分配） */
-            _row: {},
+            /** 当前小时在 raw 中的基址（惰性行对象依赖它取值） */
+            _base: 0,
             /** 该视图的轴标签间隔建议（供图表按点数自适应） */
             axisInterval: 0,
             /** 视图是否经过降采样（只用于显示，禁止参与指标计算） */
@@ -322,35 +436,51 @@
         const n = view.length;
         view.axisInterval = n > 0 ? Math.max(1, Math.floor(n / 8)) : 1;
 
+        // V2.3.1（任务书 §4）：行对象改为【惰性 getter】。
+        // 旧实现每小时把 11 列全部写入行对象 —— 一次 map 就是 8760 × 11 = 96360 次
+        // 属性写入，而回调通常只读其中 1~2 列。改为 getter 后：
+        //   · 每视图只定义 11 个 getter（O(1) 分配）；
+        //   · 遍历中每小时只剩 1 次基址赋值；
+        //   · 属性访问按需读 raw，读几列就付出几列的代价。
+        // ⚠ 约束不变：row 仍是复用对象，回调内不得把它存入数组或跨迭代持有。
+        const row = {};
+        if (raw) {
+            for (let c = 0; c < COL_COUNT; c++) {
+                const ci = c;
+                Object.defineProperty(row, KEYS[ci], {
+                    get: function () { return raw[view._base + ci]; },
+                    enumerable: true,
+                    configurable: true,
+                });
+            }
+        }
+        view._row = row;
+
         /** 真实小时序号 */
         view.hourAt = function (i) {
             return indices ? indices[i] : i;
         };
 
-        /** 遍历：fn(row, realHour, i)，row 为复用对象 */
+        /** 遍历：fn(row, realHour, i)，row 为复用对象（惰性取值） */
         view.forEach = function (fn) {
-            const raw = result.results;
-            const row = view._row;
+            const r = view._row;
             const idx = indices;
             for (let i = 0; i < n; i++) {
                 const h = idx ? idx[i] : i;
-                const base = h * COL_COUNT;
-                for (let c = 0; c < COL_COUNT; c++) row[KEYS[c]] = raw[base + c];
-                fn(row, h, i);
+                view._base = h * COL_COUNT;
+                fn(r, h, i);
             }
         };
 
         /** map：只保留 fn 的返回值（通常是数字），不保留 row */
         view.map = function (fn) {
             const out = new Array(n);
-            const raw = result.results;
-            const row = view._row;
+            const r = view._row;
             const idx = indices;
             for (let i = 0; i < n; i++) {
                 const h = idx ? idx[i] : i;
-                const base = h * COL_COUNT;
-                for (let c = 0; c < COL_COUNT; c++) row[KEYS[c]] = raw[base + c];
-                out[i] = fn(row, h, i);
+                view._base = h * COL_COUNT;
+                out[i] = fn(r, h, i);
             }
             return out;
         };
@@ -358,14 +488,12 @@
         /** reduce */
         view.reduce = function (fn, init) {
             let acc = init;
-            const raw = result.results;
-            const row = view._row;
+            const r = view._row;
             const idx = indices;
             for (let i = 0; i < n; i++) {
                 const h = idx ? idx[i] : i;
-                const base = h * COL_COUNT;
-                for (let c = 0; c < COL_COUNT; c++) row[KEYS[c]] = raw[base + c];
-                acc = fn(acc, row, h, i);
+                view._base = h * COL_COUNT;
+                acc = fn(acc, r, h, i);
             }
             return acc;
         };
@@ -382,12 +510,11 @@
             return child;
         };
 
-        /** 一次性取出某列（Float64Array，全分辨率按视图顺序） */
+        /** 一次性取出某列的副本（Float64Array，会创建临时数组；仅确需连续数组时使用） */
         view.column = function (column) {
             const c = resolveColumn(column);
             const out = new Float64Array(n);
-            if (c < 0) return out;
-            const raw = result.results;
+            if (c < 0 || !raw) return out;
             const idx = indices;
             for (let i = 0; i < n; i++) {
                 const h = idx ? idx[i] : i;
@@ -396,6 +523,50 @@
             return out;
         };
 
+        return view;
+    }
+
+    /**
+     * 列视图（任务书 §4 模式1）：单列直接访问，零分配。
+     *
+     * 与 HourView 的区别：HourView 服务于"逐小时多列"的既有渲染函数；
+     * 当一个图表只需要**一列**时，用本视图可完全避免行对象与整列复制。
+     */
+    function createColumnView(result, column) {
+        const c = resolveColumn(column);
+        const raw = (result && result.results) ? result.results : null;
+        const n = (result && c >= 0) ? result.hours : 0;
+        const view = {
+            length: n,
+            column: c,
+            result: result,
+            /** 第 i 小时的值（零分配，直接读 hour-major 基址） */
+            get: function (i) {
+                return (i >= 0 && i < n) ? raw[i * COL_COUNT + c] : 0;
+            },
+            /** 映射为普通数组（仅当调用方确需数组时才创建） */
+            map: function (fn) {
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) out[i] = fn(raw[i * COL_COUNT + c], i);
+                return out;
+            },
+            /** 求和（单次遍历，零分配） */
+            sum: function () {
+                let s = 0;
+                for (let i = 0; i < n; i++) s += raw[i * COL_COUNT + c];
+                return s;
+            },
+            /** 极值（单次遍历，零分配，返回 [min, max]） */
+            extent: function () {
+                let mn = Infinity, mx = -Infinity;
+                for (let i = 0; i < n; i++) {
+                    const v = raw[i * COL_COUNT + c];
+                    if (v < mn) mn = v;
+                    if (v > mx) mx = v;
+                }
+                return [mn, mx];
+            },
+        };
         return view;
     }
 
@@ -417,7 +588,16 @@
      * @returns {{indices:Int32Array, points:number, downsampled:boolean}}
      */
     function downsampleIndices(values, maxPoints) {
-        const n = values.length;
+        return downsampleByAccessor(function (i) { return values[i]; }, values.length, maxPoints);
+    }
+
+    /**
+     * 降采样核心：从访问器取值，避免为定位极值而先复制整列（任务书 §3 / §5）。
+     * @param {Function} get (i) => value
+     * @param {number} n 数据长度
+     * @param {number} maxPoints 目标点数上限
+     */
+    function downsampleByAccessor(get, n, maxPoints) {
         if (!(maxPoints > 0) || n <= maxPoints) {
             const all = new Int32Array(n);
             for (let i = 0; i < n; i++) all[i] = i;
@@ -433,9 +613,9 @@
             const e = Math.min(n, Math.floor((b + 1) * size));
             if (e <= s) continue;
             let iMin = s, iMax = s;
-            let vMin = values[s], vMax = values[s];
+            let vMin = get(s), vMax = get(s);
             for (let i = s + 1; i < e; i++) {
-                const v = values[i];
+                const v = get(i);
                 if (v < vMin) { vMin = v; iMin = i; }
                 if (v > vMax) { vMax = v; iMax = i; }
             }
@@ -450,19 +630,22 @@
     const DEFAULT_MAX_POINTS = 1500;
 
     /**
-     * 图表数据缓存（§9）。
-     * Key = schemeKey + chartType + column + month + maxPoints
-     * 数据未变化时不重复计算显示数据。
+     * 图表数据缓存（任务书 §8）。
+     * Key = simulationKey ‖ chartType ‖ column ‖ month ‖ maxPoints
+     *
+     * V2.3.1（任务书 §9 / §10）：Key 的第一段从 schemeKey 改为 **simulationKey**——
+     * 同一方案在不同运行参数 / 不同输入数据下必须命中不同缓存，否则会读到旧结果。
+     * 顶层分隔符用 '||'（simulationKey 内部只含单 '|'），便于按方案前缀精准清除。
      */
     const ChartDataCache = {
         _m: new Map(),
         LIMIT: 80,
         stats: { hits: 0, misses: 0 },
 
-        key(schemeKey, chartType, column, month, maxPoints) {
-            return [schemeKey || '', chartType || '', column === undefined || column === null ? '-' : column,
+        key(simulationKey, chartType, column, month, maxPoints) {
+            return [simulationKey || '', chartType || '', column === undefined || column === null ? '-' : column,
                 month === undefined || month === null ? '-' : month,
-                maxPoints === undefined || maxPoints === null ? '-' : maxPoints].join('|');
+                maxPoints === undefined || maxPoints === null ? '-' : maxPoints].join('||');
         },
 
         get(k) {
@@ -487,6 +670,20 @@
                 this._m.delete(oldest);
             }
             return v;
+        },
+
+        /** 按 simulationKey 前缀清除（供 SimulationResultCache 淘汰时联动，任务书 §33 / §34） */
+        deleteBySimulationKey(simulationKey) {
+            if (!simulationKey) return 0;
+            let removed = 0;
+            const prefix = simulationKey + '||';
+            for (const k of Array.from(this._m.keys())) {
+                if (k === simulationKey || k.indexOf(prefix) === 0) {
+                    this._m.delete(k);
+                    removed++;
+                }
+            }
+            return removed;
         },
 
         clear() {
@@ -520,7 +717,7 @@
         getHourlySeries(result, column, opts) {
             const maxPoints = (opts && opts.maxPoints) || DEFAULT_MAX_POINTS;
             const label = KEY_TO_LABEL[column] || column;
-            const sk = schemeKeyOf(result);
+            const sk = simulationKeyOf(result);
             const ck = ChartDataCache.key(sk, 'hourly', label, null, maxPoints);
 
             const cached = ChartDataCache.get(ck);
@@ -528,25 +725,29 @@
                 return Object.assign({}, cached, { cached: true });
             }
 
-            const full = getColumn(result, label);          // 全分辨率（用于定位极值）
-            const ds = downsampleIndices(full, maxPoints);
+            // V2.3.1（任务书 §3）：直接在 hour-major 原始数组上以步长访问定位极值，
+            // 不再先复制整列（省去 70 KB 临时 Float64Array 与一次 8760 次拷贝）
+            const raw = result.results;
+            const cIdx = resolveColumn(label);
+            const ds = downsampleByAccessor(function (h) { return raw[h * COL_COUNT + cIdx]; },
+                getLength(result), maxPoints);
 
             const values = new Array(ds.points);
             const realHours = new Array(ds.points);
             for (let i = 0; i < ds.points; i++) {
                 const h = ds.indices[i];
                 realHours[i] = h;
-                values[i] = full[h];
+                values[i] = raw[h * COL_COUNT + cIdx];
             }
 
             const built = {
                 column: label,
-                hours: realHours.map(h => h),      // 类别轴直接用真实小时号
+                hours: realHours.slice(),          // 类别轴直接用真实小时号
                 values: values,
                 realHours: realHours,
                 indices: ds.indices,
                 downsampled: ds.downsampled,
-                originalPoints: full.length,
+                originalPoints: getLength(result),
                 points: ds.points,
                 axisInterval: Math.max(1, Math.floor(ds.points / 8)),
             };
@@ -562,7 +763,7 @@
          * @returns {Object} HourView（全 8760，无降采样）
          */
         getFullView(result) {
-            const sk = schemeKeyOf(result);
+            const sk = simulationKeyOf(result);
             const ck = ChartDataCache.key(sk, 'fullview', '-', null, null);
             const hit = ChartDataCache.get(ck);
             if (hit) return hit;
@@ -582,7 +783,7 @@
         getHourlyView(result, column, maxPoints) {
             const mp = maxPoints || DEFAULT_MAX_POINTS;
             const label = KEY_TO_LABEL[column] || column;
-            const sk = schemeKeyOf(result);
+            const sk = simulationKeyOf(result);
             const ck = ChartDataCache.key(sk, 'hourlyview', label, null, mp);
             const hit = ChartDataCache.get(ck);
             if (hit) return hit;
@@ -611,7 +812,7 @@
             const mp = maxPoints || DEFAULT_MAX_POINTS;
             const cols = (columns || ['pv', 'wind', 'discharge', 'import', 'charge', 'hydrogen', 'export'])
                 .map(c => KEY_TO_LABEL[c] || c);
-            const sk = schemeKeyOf(result);
+            const sk = simulationKeyOf(result);
             const ck = ChartDataCache.key(sk, 'overviewview', cols.join('+'), null, mp);
             const hit = ChartDataCache.get(ck);
             if (hit) return hit;
@@ -619,21 +820,28 @@
             const n = getLength(result);
             if (n <= mp) return ChartDataCache.set(ck, createHourView(result, null));
 
+            const raw = result.results;
+            const colIdx = cols.map(label => resolveColumn(label));
+
+            // V2.3.1（任务书 §5）：单次遍历同时提取 7 列的极值索引。
+            // 旧实现先调 7 次 getColumnArray（7 × 70 KB 临时数组 + 7 次 8760 拷贝），
+            // 再各自扫描一遍；现在零中间数组，一遍扫完。
             const bucketCount = Math.max(1, Math.floor(mp / (2 * Math.max(1, cols.length))));
             const size = n / bucketCount;
             const picked = new Set();
 
-            const colData = cols.map(label => getColumn(result, label));
             for (let b = 0; b < bucketCount; b++) {
                 const s = Math.floor(b * size);
                 const e = Math.min(n, Math.floor((b + 1) * size));
                 if (e <= s) continue;
-                for (const arr of colData) {
-                    let iMin = s, iMax = s, vMin = arr[s], vMax = arr[s];
-                    for (let i = s + 1; i < e; i++) {
-                        const v = arr[i];
-                        if (v < vMin) { vMin = v; iMin = i; }
-                        if (v > vMax) { vMax = v; iMax = i; }
+                for (let ci = 0; ci < colIdx.length; ci++) {
+                    const c = colIdx[ci];
+                    let iMin = s, iMax = s;
+                    let vMin = raw[s * COL_COUNT + c], vMax = vMin;
+                    for (let h = s + 1; h < e; h++) {
+                        const v = raw[h * COL_COUNT + c];
+                        if (v < vMin) { vMin = v; iMin = h; }
+                        if (v > vMax) { vMax = v; iMax = h; }
                     }
                     picked.add(iMin);
                     picked.add(iMax);
@@ -665,7 +873,7 @@
 
         /** 全分辨率月度视图（供逐月图使用；内部只读 MonthSummary 缓存） */
         getMonthlyView(result) {
-            const sk = schemeKeyOf(result);
+            const sk = simulationKeyOf(result);
             const ck = ChartDataCache.key(sk, 'monthview', '-', null, null);
             const hit = ChartDataCache.get(ck);
             if (hit) return hit;
@@ -697,16 +905,22 @@
      */
     const SimulationResultCache = {
         _m: new Map(),
-        LIMIT: 8,          // 最多保留 8 个方案的完整逐时结果
+        LIMIT: 8,          // 最多保留 8 个方案的完整逐时结果（任务书 §12：8~10 个 + LRU）
 
+        /**
+         * 登记用户查看过的结果。
+         * LRU 淘汰时联动清除该方案的图表缓存，避免已释放的结果仍被视图引用（任务书 §33）。
+         */
         put(result) {
-            const k = schemeKeyOf(result);
+            const k = simulationKeyOf(result);
             if (!k) return result;
             if (this._m.has(k)) this._m.delete(k);
             this._m.set(k, result);
             while (this._m.size > this.LIMIT) {
                 const oldest = this._m.keys().next().value;
                 this._m.delete(oldest);
+                // 被淘汰的结果不再驻留 → 其图表显示数据一并释放，防止内存缓慢增长
+                ChartDataCache.deleteBySimulationKey(oldest);
             }
             return result;
         },
@@ -746,6 +960,7 @@
             if (!result) return result;
             const out = {
                 key: result.key,
+                simulationKey: result.simulationKey,
                 scheme: result.scheme,
                 technical: result.technical,
                 economic: result.economic,
@@ -758,14 +973,14 @@
         },
 
         put(result) {
-            const k = schemeKeyOf(result);
+            const k = simulationKeyOf(result);
             if (!k) return result;
             this._m.set(k, this.strip(result));
             return result;
         },
 
-        get(schemeKey) {
-            return this._m.get(schemeKey);
+        get(simulationKey) {
+            return this._m.get(simulationKey);
         },
 
         clear() {
@@ -806,6 +1021,19 @@
     // 八、导出接口
     // =========================================================================
 
+    /**
+     * 缓存清理接口（任务书 §34）。
+     * 在「更换输入数据」「输入数据版本变化」「用户主动清理」时调用（§35）。
+     */
+    function clearSimulationCache() { SimulationResultCache.clear(); }
+    function clearChartCache() { ChartDataCache.clear(); }
+    function clearOptimizationCache() { OptimizationResultCache.clear(); }
+    function clearAllCaches() {
+        clearSimulationCache();
+        clearChartCache();
+        clearOptimizationCache();
+    }
+
     const ResultDataStore = {
         // 常量
         COLS: COLS,
@@ -814,6 +1042,7 @@
         KEY_TO_LABEL: KEY_TO_LABEL,
         LABEL_TO_KEY: LABEL_TO_KEY,
         MONTH_DAYS: MONTH_DAYS,
+        SIMULATION_ENGINE_VERSION: SIMULATION_ENGINE_VERSION,
 
         // §4 要求的基础接口
         create: create,
@@ -824,6 +1053,15 @@
         getLength: getLength,
         getAnnualSummary: getAnnualSummary,
         getMonthlySummary: getMonthlySummary,
+
+        // V2.3.1：数据访问微优化（任务书 §3 / §4）
+        getColumnArray: getColumnArray,
+        createColumnView: createColumnView,
+        getHourObject: getHourRow,
+        createSimulationKey: createSimulationKey,
+        simulationKeyOf: simulationKeyOf,
+        createInputVersionFromRows: createInputVersionFromRows,
+        downsampleByAccessor: downsampleByAccessor,
 
         // 扩展
         resolveColumn: resolveColumn,
@@ -839,6 +1077,12 @@
         OptimizationResultCache: OptimizationResultCache,
         ChartDataCache: ChartDataCache,
         ChartDataAdapter: ChartDataAdapter,
+
+        // V2.3.1：缓存清理接口（任务书 §34）
+        clearSimulationCache: clearSimulationCache,
+        clearChartCache: clearChartCache,
+        clearOptimizationCache: clearOptimizationCache,
+        clearAllCaches: clearAllCaches,
     };
 
     self.ResultDataStore = ResultDataStore;
